@@ -1,0 +1,1 @@
+install.packages("latex2exp")

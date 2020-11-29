@@ -1,0 +1,98 @@
+---
+title: "Reproducing Karin et al's longitudal model of senescent cell growth"
+output: html_notebook
+params:
+  data_dir: '../dat/'
+---
+
+```{r}
+library(dplyr)
+library(foreach)
+library(ggplot2)
+library(latex2exp)
+library(purrr)
+library(reshape2)
+library(stringr)
+library(tidyverse)
+
+# Stan-specific stuff
+library(rstan)
+library(gridExtra)
+rstan_options (auto_write = TRUE)
+options (mc.cores = parallel::detectCores ())
+set.seed(3) # for reproductibility
+```
+
+As our first step, we load the data we'll use to fit the 16 models described
+in Karin et al (TODO: actual reference). To do so, we load the raw data
+from their paper (used for their fig. 2) and transform it into a 3-column
+dataframe indexed by mouse number and week of measurement taken.
+
+```{r}
+snc_counts_fname <- str_c(
+  params$data_dir, "raw", "senescent_cells_and_the_dynamics_of_aging__fig_2.csv",
+  sep="/"
+)
+raw_snc_counts <- read.csv(snc_counts_fname, header=TRUE)
+snc_counts <- melt(
+  data = raw_snc_counts, 
+  id.vars = "mouse.week", 
+  measure.vars = c(
+    "X8", "X16", "X24", "X32", "X40", "X48", "X56", "X64", "X72", "X80"
+  ),
+  value.name = "TBL_x_10_5"
+)
+snc_counts <- snc_counts %>%
+  rename(week = "variable", mouse = "mouse.week")
+snc_counts$week <- map_int(snc_counts$week, function (week) { return(as.integer(substr(week, 2, str_length(week)))) })
+head(snc_counts)
+```
+Now we're going to reproduce Karin et al's fig. 2a, since it doesn't require any
+model-fitting, although we won't do the nice grey shading they did for now...
+```{r}
+ggplot(
+  data = snc_counts, 
+  aes(x = week, y = TBL_x_10_5, color = mouse, group = mouse)
+) +
+  xlab("Week") + ylab(TeX("$ TBL \\times 10^5 $")) +
+  scale_color_gradientn(colours = rainbow(5)) + geom_line() + geom_point()
+```
+
+Next we're going to replicate the first part of Karin et al's fig 2c, which
+shows the mean and standard deviation of normalized senescent cell counts
+at each week time point.
+
+To normalize senescent cell counts, we adjust all counts to make the mean
+abundance across the first three measured time points -- 8, 16, 24 -- equal 1.
+To do so, we set
+$$
+\beta = \frac{1}{3n} \sum_{i=1}^n \sum_{j \in 8, 16, 24} c_{ij} = 1
+$$
+and divide all counts by it.
+
+
+```{r}
+norm_const <- mean(
+  snc_counts[snc_counts$week %in% c(8, 16, 24),]$TBL_x_10_5, na.rm = T
+)
+snc_counts$norm_abundance <- snc_counts$TBL_x_10_5 / norm_const
+mean_abundances <- aggregate(
+  snc_counts$norm_abundance, list(snc_counts$week), mean, na.rm = T
+)$x
+stddev_abundances <- aggregate(
+  snc_counts$norm_abundance, list(snc_counts$week), sd, na.rm = T
+)$x
+mean_stddev_abundances <- data.frame(
+  mean = mean_abundances,
+  stddev = stddev_abundances,
+  week = unique(snc_counts$week)
+)
+p <- ggplot(mean_stddev_abundances, aes(x=week, y=mean)) + geom_point() +
+    geom_errorbar(aes(ymin=mean-stddev/2, ymax=mean+stddev/2), width=.2,
+                 position=position_dodge(0.05))
+print(p)
+```
+Notably our standard deviation bars seem larger than whatever Karin et al show
+in their full version of this figure (fig. 2c), but we seem to reproduce their
+standard error values based on their display of them in fig. 2d.
+
