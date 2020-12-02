@@ -1,6 +1,7 @@
 ---
 title: "Reproducing Karin et al's longitudal model of senescent cell growth"
 output:
+  pdf_document: default
   html_document:
     df_print: paged
 params:
@@ -159,32 +160,45 @@ fit_karin_et_al <- sampling(
 Inspired by [this Stan case study](https://mc-stan.org/users/documentation/case-studies/boarding_school_case_study.html#3_scaling_up_ode-based_models)
 and general best practices for checking the results of HMC, let's do some
 posterior checks to verify HMC ended up sampling a reasonable approximation
-of the true posterior. First, we can look at $ \hat{R} $ and $ n_{\text{eff}} $. which measures the
-level of agreement between our four independent Markov chains. An $ \hat{R} \leq 1.01 $
-implies close agreement between the chains. We should also look at $ n_{\text{eff}} $, 
-which provides a proxy measure of __effective__ sample size, which we can
-think of as sample size adjusted down as a function of how correlated different
-samples from the posterior are.
+of the true posterior. First, we can look at \( \hat{R} \) and \( n_{\text{eff}} \).
+\( \hat{R} \) measures the level of agreement between our four independent
+Markov chains. An \( \hat{R} \leq 1.01 \)
+for a parameter implies close agreement between the chains, so it's great to see
+that all of our parameters of interest have \( \hat{R} \)s of 1. 
+$ n_{\text{eff}} $, is a proxy measure of __effective__ sample size, which we
+can think of as sample size adjusted down as a function of how correlated 
+different samples from the posterior are. Again, our \( n_{\text{eff}} \)s all
+seem pretty good given the number of samples we draw.
+
 ```{r}
 pars=c('eta', 'beta', 'eps', 'lp__')
 print(fit_karin_et_al, pars = pars)
 ```
 
-```{r}
-pairs(fit_karin_et_al, pars = pars)
-```
+Next, we can look at density plots for our posterior distribution to verify
+that the posterior distributions look uni-modal (assuming that's what we want)
+and relatively similar across chains. In this case, they do!
 
 ```{r}
 stan_dens(fit_karin_et_al, pars = pars, separate_chains = TRUE)
 ```
 
+Now we can actually evaluate our SR model with respect to data. As a first-pass
+evaluation, we'll basically replicate Karin et al's fig. 2c with only
+predictions from the SR model included for now. As the graph shows, our model
+seems to capture the progression of SnC abundance growth as well or, in my
+opinion, better than the max. likelihood equivalent in Karin et al. Our
+posterior predictive means -- as we'd hope -- look almost identical to
+Karin et al's but our 95% predictive intervals capture the variance
+(as measured by standard deviation) of the individual mouse estimates better 
+than their SR model does.
 
 ```{r}
 snc_counts_pred <- cbind(
   as.data.frame(
     summary(
       fit_karin_et_al, pars = "pred_cells_means", 
-      probs = c(0.025, 0.5, 0.975)
+      probs = c(0.05, 0.5, 0.95)
     )$summary
   ), 
   t, 
@@ -192,12 +206,8 @@ snc_counts_pred <- cbind(
   stddev_abundances
 )
 colnames(snc_counts_pred) <- make.names(colnames(snc_counts_pred)) # to remove % in the col names
-head(snc_counts_pred)
-```
-
-```{r}
 ggplot(snc_counts_pred, mapping = aes(x = t)) +
-  geom_ribbon(aes(ymin = X2.5., ymax = X97.5.), fill = "orange", alpha = 0.6) +
+  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
   geom_line(mapping = aes(x = t, y = X50.)) + 
   geom_point(mapping = aes(y = mean_abundances)) +
   geom_errorbar(
