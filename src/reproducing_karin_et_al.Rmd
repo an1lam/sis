@@ -1,8 +1,10 @@
 ---
 title: "Reproducing Karin et al's longitudal model of senescent cell growth"
-output: html_notebook
+output:
+  html_document:
+    df_print: paged
 params:
-  data_dir: '../dat/'
+  data_dir: ../dat/
 ---
 
 ```{r}
@@ -22,7 +24,7 @@ rstan_options (auto_write = TRUE)
 options (mc.cores = parallel::detectCores ())
 set.seed(3) # for reproductibility
 ```
-
+# Loading and visualizing the data
 As our first step, we load the data we'll use to fit the 16 models described
 in Karin et al (TODO: actual reference). To do so, we load the raw data
 from their paper (used for their fig. 2) and transform it into a 3-column
@@ -33,7 +35,8 @@ snc_counts_fname <- str_c(
   params$data_dir, "raw", "senescent_cells_and_the_dynamics_of_aging__fig_2.csv",
   sep="/"
 )
-raw_snc_counts <- read.csv(snc_counts_fname, header=TRUE)
+raw_snc_counts <- read.csv(snc_counts_fname, header=TRUE) %>%
+  drop_na()
 snc_counts <- melt(
   data = raw_snc_counts, 
   id.vars = "mouse.week", 
@@ -45,7 +48,7 @@ snc_counts <- melt(
 snc_counts <- snc_counts %>%
   rename(week = "variable", mouse = "mouse.week")
 snc_counts$week <- map_int(snc_counts$week, function (week) { return(as.integer(substr(week, 2, str_length(week)))) })
-head(snc_counts)
+max(snc_counts$mouse)
 ```
 Now we're going to reproduce Karin et al's fig. 2a, since it doesn't require any
 model-fitting, although we won't do the nice grey shading they did for now...
@@ -68,8 +71,8 @@ To do so, we set
 $$
 \beta = \frac{1}{3n} \sum_{i=1}^n \sum_{j \in 8, 16, 24} c_{ij} = 1
 $$
-and divide all counts by it.
-
+and divide all counts by it. In other words, normalize by the mean abundance
+from the first three weeks of data.
 
 ```{r}
 norm_const <- mean(
@@ -95,4 +98,123 @@ print(p)
 Notably our standard deviation bars seem larger than whatever Karin et al show
 in their full version of this figure (fig. 2c), but we seem to reproduce their
 standard error values based on their display of them in fig. 2d.
+
+## Fitting the model
+As a way to check we haven't missed something integral to Karin et al's work,
+we're going to fit a Bayesian version of their SR (Saturated-Removal) model
+and verify that we (hopefully) approximately reproduce their predictive
+distribution. 
+
+Since they did maximum likelihood estimation (with a grid search I'd add)
+whereas we're fitting a full posterior distribution with close-to-noninformative
+prior, we don't expect exact matching. Because the likelihood includes an ODE,
+analytically showing the data dominates the prior goes beyond my abilities, but
+intuitively I expect the posterior predictive distribution to have approximately
+the same mean as theirs with wider error bars.
+
+```{r}
+# Time series of SnC counts
+mice <- unique(snc_counts$mouse)
+weeks <- unique(snc_counts$week)
+n_mice <- length(mice)
+n_weeks <- length(weeks)
+print(n_mice)
+snc_abundance <- matrix(nrow = n_mice, ncol=n_weeks)
+for (m in 1:n_mice) {
+  for (t in 1:n_weeks) {
+    week <- weeks[t]
+    mouse <- mice[m]
+    mouse_week_index <- which(snc_counts$mouse == mouse & snc_counts$week == week)[1]
+    snc_abundance[m, t] <- snc_counts$norm_abundance[mouse_week_index]
+  }
+}
+
+# times
+t <- seq(0, n_weeks * 8, by = 8) # 8 hard-coded to match data
+t0 = 0
+t <- t[-1]
+
+# initial conditions
+y0 = c(1)
+dim(y0) <- (1)
+
+# data for Stan
+data_snc <- list(n_weeks = n_weeks, n_mice = n_mice, y0 = y0, t0 = t0, ts = t, cells = snc_abundance)
+
+# number of MCMC steps
+niter <- 2000
+```
+
+
+```{r}
+model <- stan_model("snc_sr_model.stan")
+fit_karin_et_al <- sampling(
+  model,
+  data = data_snc,
+  iter = niter,
+  chains = 4
+)
+```
+## Diagnosing model fit
+Inspired by [this Stan case study](https://mc-stan.org/users/documentation/case-studies/boarding_school_case_study.html#3_scaling_up_ode-based_models)
+and general best practices for checking the results of HMC, let's do some
+posterior checks to verify HMC ended up sampling a reasonable approximation
+of the true posterior. First, we can look at $ \hat{R} $ and $ n_{\text{eff}} $. which measures the
+level of agreement between our four independent Markov chains. An $ \hat{R} \leq 1.01 $
+implies close agreement between the chains. We should also look at $ n_{\text{eff}} $, 
+which provides a proxy measure of __effective__ sample size, which we can
+think of as sample size adjusted down as a function of how correlated different
+samples from the posterior are.
+```{r}
+pars=c('eta', 'beta', 'eps', 'lp__')
+print(fit_karin_et_al, pars = pars)
+```
+
+```{r}
+pairs(fit_karin_et_al, pars = pars)
+```
+
+```{r}
+stan_dens(fit_karin_et_al, pars = pars, separate_chains = TRUE)
+```
+
+
+```{r}
+snc_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_karin_et_al, pars = "pred_cells_means", 
+      probs = c(0.025, 0.5, 0.975)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+colnames(snc_counts_pred) <- make.names(colnames(snc_counts_pred)) # to remove % in the col names
+head(snc_counts_pred)
+```
+
+```{r}
+ggplot(snc_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes(ymin = X2.5., ymax = X97.5.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    aes(
+      ymin=mean_abundances-stddev_abundances/2,
+      ymax=mean+stddev_abundances/2
+    ),
+    width=.2,
+    position=position_dodge(0.05)
+  ) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
+  labs(x = "Week", y = "SnC (normalized)")
+```
+
+
+
+
+
+
 
