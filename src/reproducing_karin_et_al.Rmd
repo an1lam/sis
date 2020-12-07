@@ -1,17 +1,19 @@
 ---
 title: "Reproducing Karin et al's longitudal model of senescent cell growth"
 output:
-  pdf_document: default
   html_document:
     df_print: paged
+  pdf_document: default
 params:
   data_dir: ../dat/
 ---
 
-```{r}
+```{r include=FALSE}
+library(brms)
 library(dplyr)
 library(foreach)
 library(ggplot2)
+library(ggpubr)
 library(latex2exp)
 library(purrr)
 library(reshape2)
@@ -19,6 +21,7 @@ library(stringr)
 library(tidyverse)
 
 # Stan-specific stuff
+library(bridgesampling)
 library(rstan)
 library(gridExtra)
 rstan_options (auto_write = TRUE)
@@ -100,7 +103,7 @@ Notably our standard deviation bars seem larger than whatever Karin et al show
 in their full version of this figure (fig. 2c), but we seem to reproduce their
 standard error values based on their display of them in fig. 2d.
 
-## Fitting the model
+## Fitting the SR model
 As a way to check we haven't missed something integral to Karin et al's work,
 we're going to fit a Bayesian version of their SR (Saturated-Removal) model
 and verify that we (hopefully) approximately reproduce their predictive
@@ -149,7 +152,7 @@ niter <- 2000
 
 ```{r}
 model <- stan_model("snc_sr_model.stan")
-fit_karin_et_al <- sampling(
+fit_snc_sr_model <- sampling(
   model,
   data = data_snc,
   iter = niter,
@@ -171,16 +174,21 @@ different samples from the posterior are. Again, our \( n_{\text{eff}} \)s all
 seem pretty good given the number of samples we draw.
 
 ```{r}
-pars=c('eta', 'beta', 'eps', 'lp__')
-print(fit_karin_et_al, pars = pars)
+pars=c('eta', 'beta', 'sigma', 'lp__', 'log_likelihood')
+print(fit_snc_sr_model, pars = pars, digits_summary = 6)
 ```
+
+```{r}
+pairs(fit_snc_sr_model, pars=pars)
+```
+
 
 Next, we can look at density plots for our posterior distribution to verify
 that the posterior distributions look uni-modal (assuming that's what we want)
 and relatively similar across chains. In this case, they do!
 
 ```{r}
-stan_dens(fit_karin_et_al, pars = pars, separate_chains = TRUE)
+stan_dens(fit_snc_sr_model, pars = pars, separate_chains = TRUE)
 ```
 
 Now we can actually evaluate our SR model with respect to data. As a first-pass
@@ -194,10 +202,10 @@ Karin et al's but our 95% predictive intervals capture the variance
 than their SR model does.
 
 ```{r}
-snc_counts_pred <- cbind(
+snc_sr_counts_pred <- cbind(
   as.data.frame(
     summary(
-      fit_karin_et_al, pars = "pred_cells_means", 
+      fit_snc_sr_model, pars = "pred_cells_means", 
       probs = c(0.05, 0.5, 0.95)
     )$summary
   ), 
@@ -205,15 +213,15 @@ snc_counts_pred <- cbind(
   mean_abundances,
   stddev_abundances
 )
-colnames(snc_counts_pred) <- make.names(colnames(snc_counts_pred)) # to remove % in the col names
-ggplot(snc_counts_pred, mapping = aes(x = t)) +
+colnames(snc_sr_counts_pred) <- make.names(colnames(snc_sr_counts_pred)) # to remove % in the col names
+ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
   geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
   geom_line(mapping = aes(x = t, y = X50.)) + 
   geom_point(mapping = aes(y = mean_abundances)) +
   geom_errorbar(
     aes(
-      ymin=mean_abundances-stddev_abundances/2,
-      ymax=mean+stddev_abundances/2
+      ymin=mean_abundances - stddev_abundances/2,
+      ymax=mean + stddev_abundances/2
     ),
     width=.2,
     position=position_dodge(0.05)
@@ -223,8 +231,123 @@ ggplot(snc_counts_pred, mapping = aes(x = t)) +
 ```
 
 
+## Fitting the USR model
+Now, to enable us to validate that our comparison produces similar qualitative
+results to the original paper's, we're going to fit a second model. The biggest
+difference between this model and the first model is that lack of a saturated
+removal term. The saturated removal term in the prior model is intended to
+capture the phenomenon in which senescent cells become so abundant
+that the immune system becomes unable to efficiently remove them.
+```{r}
+model <- stan_model("snc_usr_model.stan")
+fit_usr_model <- sampling(
+  model,
+  data = data_snc,
+  iter = niter,
+  chains = 4
+)
+```
 
 
+## Diagnosing model fit
+We look at the same diagnostics as previously and again find that our
+chains have mixed and our \( n_{\text{eff}} \)s seem reasonable. Our
+posterior densities also again look (mostly) unimodal.
+
+```{r}
+pars=c('eta', 'beta', 'sigma', 'log_likelihood', 'lp__')
+print(fit_usr_model, pars = pars)
+```
+
+```{r}
+pairs(fit_usr_model, pars = pars)
+```
+
+```{r}
+stan_dens(fit_usr_model, pars = pars, separate_chains = TRUE)
+```
+
+Finally, we can again look at how well our posterior intervals capture
+the true data points. To make qualitative comparison with the prior model easier
+we plot both model's fits on the graph.
+
+```{r}
+snc_usr_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_usr_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+colnames(snc_usr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
+p_usr <- ggplot(snc_usr_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "blue", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    data = snc_sr_counts_pred, 
+    aes(
+      ymin=mean_abundances - stddev_abundances/2,
+      ymax=mean + stddev_abundances/2,
+    ),
+    width=.2,
+    position=position_dodge(0.05),
+  ) +
+  labs(title = "Unsaturated Removal Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+
+p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    aes(
+      ymin=mean_abundances - stddev_abundances/2,
+      ymax=mean + stddev_abundances/2
+    ),
+    width=.2,
+    position=position_dodge(0.05)
+  ) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
+  labs(title = "Saturated Removal Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+ggarrange(p_usr, p_sr)
+```
+
+Interestingly, our USR graph looks much better than the one in the Alon paper
+with respect to matching the observations.
+
+Fortunately, since we're being Bayesian about all this, we can improve over
+the Alon paper's original model comparison by using Bayes Factors to compute
+the odds ratio of our two models' marginal likelihoods (assuming equal
+prior probability between the two). 
+
+As we expected based on Karin et al, the SNC SR model is deemed much more
+probable than the USR model. Note that the Bayes factor measures, assuming
+our two models are denoted \( \mathcal{M}_1 \), \( \mathcal{M}_2 \):
+$$
+\frac{P(\mathcal{M}_1 \mid \text{data})}{P(\mathcal{M}_2 \mid \text{data})},
+$$
+so this posterior odds ratio accounts for the relative sizes of the parameter
+spaces used by the two models.
+
+```{r}
+fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model, silent = T)
+fit_usr_model.bridge <- bridge_sampler(fit_usr_model, silent = T)
+bayes_factor(fit_snc_sr_model.bridge, fit_usr_model.bridge)
+post_prob(fit_snc_sr_model.bridge, fit_usr_model.bridge)
+```
+
+# Senescence-Induced Senescence Model
+The SIS model seeks to test a hypothesis that senescent cells can be coarsely
+broken down into long-lived and short-lived senescent cells and that these
+long-lived cells can induce healthy cells to become (short-lived type) 
+senescent.
+
+In order to test this, we add an additional term \( \alpha \) to model
+the 
 
 
 
