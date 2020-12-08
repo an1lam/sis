@@ -46,3 +46,5 @@ vignettes/*.pdf
 ########
 data/
 dat/
+src/saved_fit/
+src/*.rds

@@ -1,0 +1,249 @@
+---
+title: "Probing the senescence-induced senescence hypothesis"
+author: "Stephen Malina"
+date: "12/7/2020"
+output:
+  bookdown::pdf_document2: default
+  bookdown::html_document2: default
+bibliography: bib.bib
+link-citations: yes
+---
+
+```{r include=FALSE}
+library(bookdown)
+library(brms)
+library(dplyr)
+library(foreach)
+library(ggplot2)
+library(ggpubr)
+library(latex2exp)
+library(loo)
+library(purrr)
+library(reshape2)
+library(stringr)
+library(tidyverse)
+
+library(rmarkdown)
+library(knitr)
+
+# Stan-specific stuff
+library(bridgesampling)
+library(rstan)
+library(gridExtra)
+rstan_options (auto_write = TRUE)
+options (mc.cores = parallel::detectCores ())
+set.seed(3) # for reproductibility
+
+```
+
+# Introduction
+Cellular senescence can be thought of as a form of cellular purgatory.
+Senescent cells can no longer divide but continue to limp along
+rather than apoptose. In young, healthy organisms, senescent
+cells can play a positive role in arresting tumor growth and healing wounds
+[@ricon2020senescence; @he2017senescence; @krtolica2001senescent]. 
+However, increasing evidence points to senescent cells contributing to the aging
+process via slowing stem cell growth and tissue regeneration and increasing
+inflammation in older organisms [@campisi2007cellular].
+
+A characteristic pattern that accompanies
+this shift is an increase in relative abundance of and slowing down
+of turnover of senescent cells. Understanding and intervening on cellular 
+senescence requires unraveling the puzzle behind why this occurs as
+organisms age. Evidence from @nelson2012senescent suggests
+that this process partly results from a "bystander effect" in which senescent 
+cells induce nearby
+healthy cells into senescence (senescence-induced senescence, SIS). 
+Here, we leverage longitudinal and
+interventional data [@karin2019senescent; @burd2013monitoring] to test
+how well a model that includes SIS from long-lived senescent cells
+captures observed senescent cell dynamics relative to two already published
+models [@karin2019senescent]. We also estimate an upper bound on the fraction
+of senescent cells which our models predicts to be long-lived based on
+longitudinal data. 
+
+# Modeling senescence-induced senescence
+As a first step towards building and assessing a model that includes
+senescence-induced senescence, we re-fit two existing models [@karin2019senescent]
+of senescent cell growth on a longitudinal senescent cell dataset
+initially produced by @burd2013monitoring and pre-processed (from images)
+by @karin2019senescent.
+
+## Introducing SR and USR base models
+In their paper,  @karin2019senescent apply a maximum likelihood framework and parameter
+grid search to fit 16 ODE-based models of senescent cell growth. Each of
+their 16 models was derived by selecting a subset of parameters from the
+following 'full' model of senescent cell growth with time/age,
+
+\begin{equation}
+\dot{C} = \underbrace{(\eta_0 + \eta_1 * t)(1 + \eta_2 * C)}_{\text{production}}
+- \underbrace{\frac{\beta_0 - \beta_1 * t}{1 + \beta_2 * C} * C}_{\text{removal}} + 
+\underbrace{\sqrt{2 \epsilon} * \xi_t}_{\text{noise}}.
+  (\#eq:1)
+\end{equation}
+
+In equation \@ref(eq:1), \( C \) denotes the normalized senescent cell abundance, measured
+in arbitrary units (AUs) (see Appendix for details). 
+The first of three expression's three variables,
+\( \eta_0,  \eta_1, \eta_2 \),
+denote initial growth rate, growth rate increase with age, and
+senescence-induced senescence rate respectively. The second of the three expression's
+three variables, \( \beta_0, \beta_1, \beta_2 \), denote initial removal rate,
+decrease in removal rate with age, and inverse of the half-way saturation
+point for senescent cell removal respectively.
+
+In @karin2019senescent, the best-performing model variant, the saturated removal (SR) model,
+got rid of the senescence-induced senescence term but otherwise left the
+model as-is. The best-performing variant without the saturated removal term (\( \beta_2 \)), i.e. the unsaturated removal (USR) model,
+also excluded the senescence-induced senescence term in its growth rate 
+expression.
+
+## Reproducing the base models in the Bayesian framework
+As a baseline
+for comparing our modified senescence-induced senescence model, we reproduced
+@karin2019senescent's SR and USR models as Bayesian models in stan [@carpenter2017stan] 
+(see Appendix TODO for details on priors, noise model, and stan configuration).
+At a high level, our results matched theirs. We compared the posterior probability
+of the two models and found that the SR model was 50.3 times more likely than
+the USR model (@bridgesampling).
+
+```{r fig-1, echo = F, fig.cap = "Unnormalized senescent cell (SnC) abundance trajectories for each mouse (top). Retrodictions and 5%/95% credible intervals for SnC abundance predicted by SR and USR models (bottom left, right) respectively. Lines denote posterior mean, dots denote observed mean abundance with error bars representing sample standard error."}
+# Load relevant objects
+data_snc <- readRDS("saved_fit/data_snc.RDS")
+snc_counts <- readRDS("saved_fit/snc_counts.RDS")
+fit_snc_sr_model <- readRDS("saved_fit/fit_snc_sr_model.RDS")
+fit_snc_usr_model <- readRDS("saved_fit/fit_snc_usr_model.RDS")
+
+t <- data_snc$ts
+mean_abundances <- aggregate(
+  snc_counts$norm_abundance, list(snc_counts$week), mean, na.rm = T
+)$x
+stddev_abundances <- aggregate(
+  snc_counts$norm_abundance, list(snc_counts$week), sd, na.rm = T
+)$x
+
+snc_sr_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sr_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+snc_usr_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_usr_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+colnames(snc_sr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
+colnames(snc_usr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
+p_raw <- ggplot(
+  data = snc_counts, 
+  aes(x = week, y = TBL_x_10_5, color = mouse, group = mouse)
+) +
+  labs(x = "Week", y = TeX("$ TBL \\times 10^5 $"), title = "Unnormalized SnC Trajectories") +
+  scale_color_gradientn(colours = rainbow(5)) + geom_line() + geom_point()
+
+p_usr <- ggplot(snc_usr_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "blue", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    data = snc_sr_counts_pred, 
+    aes(
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances,
+    ),
+    width=.2,
+    position=position_dodge(0.05),
+  ) +
+  labs(title = "USR Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+
+p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    aes(
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances
+    ),
+    width=.2,
+    position=position_dodge(0.05)
+  ) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
+  labs(title = "SR Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+# ggarrange(p_raw, p_usr, p_sr)
+grid.arrange(p_raw, p_usr, p_sr, layout_matrix = matrix(c(1, 3, 1, 2), nrow = 2))
+```
+Althought the SR model's full posterior fits
+the data meaningfully better than the USR model's, as Figure \@ref(fig:fig-1) 
+shows, both models' credible intervals and posterior means mostly capture the 
+observed data's evolution through time.
+
+### Adding senescence-induced senescence (SIS) to the model
+As mentioned, the original full model included a term for SIS. 
+However, the model treated SIS as growing as a function of overall
+SnC count and total SnC growth rate. Intuitively, given a long enough time
+this would inevitably lead to exponential growth of the number of senescent cells,
+which we don't observe. As suggested by @van2014role, it's instead possible
+that a small fraction of senescent cells both turn over more slowly and
+induce senescence in their neighbors, but the majority do not.
+
+To test this hypothesis, we can modify the SR model by replacing
+the current time-dependent growth rate term with a time-dependent
+long-lived cell SIS term:
+
+\begin{align}
+\dot{L} &= \alpha \\
+\dot{C} &= (\eta_0 + \eta_2 * L) -
+  \frac{\beta_0 - \beta_1 * t}{1 + \beta_2 * C} * C + 
+  \sqrt{2 \epsilon} * \xi_t.
+(\#eq:2)
+\end{align}
+
+In equation \@ref(eq:2), \( \dot{L} \) denotes the time rate of change of
+(latent) long-lived senescent cell count. Solving for \( L \) this becomes
+\begin{equation}
+\dot{C} = (\eta_0 + \eta_2 * c + \eta_2 * \alpha t) - 
+  \frac{\beta_0 - \beta_1 * t}{1 + \beta_2 * C} * C + 
+  \sqrt{2 \epsilon} * \xi_t.
+(\#eq:3)
+\end{equation}
+where \( c \) denotes the long-lived SnC abundance and \( \alpha t \) the
+(assumed to be linear) increase as a function of time.
+
+After fitting this model, we find that it fits the data, as measured by
+a Bayes Factor, 25 times better (under a uniform prior between models) than
+the SR model. This suggests that long-lived senescent cell SIS may partially
+explain senescent cell dynamics when combined with saturated removal.
+
+### Validating SIS inferences against literature
+To do...
+
+# Upper bounding the fraction of long-lived SnCs
+To do...
+
+# Limitations
+- Can't model spatial dynamics.
+- Under-determination issues.
+- Strong priors.
+
+# Appendix
+## Differences between our and the original model
+### Normally-distributed error with ODE vs. stochastic differential equation
+
+### Fully Bayesian vs. Maximum Likelihood model
+
+### Auto-catalysis term vs. SIS term
+
+# References

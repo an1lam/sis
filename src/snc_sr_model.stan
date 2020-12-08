@@ -15,11 +15,11 @@ functions {
 }
 
 data {
-  int<lower=1> n_weeks;
+  int<lower=1> n_days;
   int<lower=1> n_mice;
   real t0;
-  real ts[n_weeks];
-  real cells[n_mice, n_weeks];
+  real ts[n_days];
+  real cells[n_mice, n_days];
 }
 
 transformed data {
@@ -33,7 +33,7 @@ parameters {
   real<lower=0> y_init[n_mice, 1];
 }
 transformed parameters{
-  real y[n_mice, n_weeks, 1];
+  real y[n_mice, n_days, 1];
   {
     real theta[4];
     theta[1:2] = eta;
@@ -46,8 +46,8 @@ transformed parameters{
 
 model {
   // Priors
-  eta[1:2] ~ normal(0.5, 0.5);
-  beta[1:2] ~ normal(0.5, 0.5);
+  eta[1:2] ~ normal(0, 0.5);
+  beta[1:2] ~ normal(0, 0.5);
   sigma ~ lognormal(-1, 1);
   
   // Sample cell counts for each mouse.
@@ -58,17 +58,17 @@ model {
 }
 
 generated quantities {
-  real pred_cells[n_mice, n_weeks];
-  real pred_cells_means[n_weeks];
+  real pred_cells[n_mice, n_days];
+  real pred_cells_means[n_days];
   real log_likelihood = 0;
   
   for (i in 1:n_mice) {
     pred_cells[i] = lognormal_rng(log(y[i, , 1]), sigma);
-    for (j in 1:n_weeks) {
+    for (j in 1:n_days) {
       log_likelihood += lognormal_lpdf(cells[i, j] | log(y[i, j, 1]), sigma);
     }
   }
-  for (i in 1:n_weeks) {
+  for (i in 1:n_days) {
     pred_cells_means[i] = mean(pred_cells[:, i]);
   }
 }

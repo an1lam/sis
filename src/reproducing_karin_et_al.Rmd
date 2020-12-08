@@ -1,9 +1,9 @@
 ---
 title: "Reproducing Karin et al's longitudal model of senescent cell growth"
 output:
+  pdf_document: default
   html_document:
     df_print: paged
-  pdf_document: default
 params:
   data_dir: ../dat/
 ---
@@ -15,6 +15,7 @@ library(foreach)
 library(ggplot2)
 library(ggpubr)
 library(latex2exp)
+library(loo)
 library(purrr)
 library(reshape2)
 library(stringr)
@@ -63,6 +64,7 @@ ggplot(
 ) +
   xlab("Week") + ylab(TeX("$ TBL \\times 10^5 $")) +
   scale_color_gradientn(colours = rainbow(5)) + geom_line() + geom_point()
+max(snc_counts$mouse)
 ```
 
 Next we're going to replicate the first part of Karin et al's fig 2c, which
@@ -272,6 +274,17 @@ the true data points. To make qualitative comparison with the prior model easier
 we plot both model's fits on the graph.
 
 ```{r}
+snc_sr_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sr_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
 snc_usr_counts_pred <- cbind(
   as.data.frame(
     summary(
@@ -283,6 +296,7 @@ snc_usr_counts_pred <- cbind(
   mean_abundances,
   stddev_abundances
 )
+colnames(snc_sr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
 colnames(snc_usr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
 p_usr <- ggplot(snc_usr_counts_pred, mapping = aes(x = t)) +
   geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "blue", alpha = 0.6) +
@@ -319,26 +333,6 @@ ggarrange(p_usr, p_sr)
 Interestingly, our USR graph looks much better than the one in the Alon paper
 with respect to matching the observations.
 
-Fortunately, since we're being Bayesian about all this, we can improve over
-the Alon paper's original model comparison by using Bayes Factors to compute
-the odds ratio of our two models' marginal likelihoods (assuming equal
-prior probability between the two). 
-
-As we expected based on Karin et al, the SNC SR model is deemed much more
-probable than the USR model. Note that the Bayes factor measures, assuming
-our two models are denoted \( \mathcal{M}_1 \), \( \mathcal{M}_2 \):
-$$
-\frac{P(\mathcal{M}_1 \mid \text{data})}{P(\mathcal{M}_2 \mid \text{data})},
-$$
-so this posterior odds ratio accounts for the relative sizes of the parameter
-spaces used by the two models.
-
-```{r}
-fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model, silent = T)
-fit_usr_model.bridge <- bridge_sampler(fit_usr_model, silent = T)
-bayes_factor(fit_snc_sr_model.bridge, fit_usr_model.bridge)
-post_prob(fit_snc_sr_model.bridge, fit_usr_model.bridge)
-```
 
 # Senescence-Induced Senescence Model
 The SIS model seeks to test a hypothesis that senescent cells can be coarsely
@@ -346,8 +340,110 @@ broken down into long-lived and short-lived senescent cells and that these
 long-lived cells can induce healthy cells to become (short-lived type) 
 senescent.
 
-In order to test this, we add an additional term \( \alpha \) to model
-the 
+In order to test this, we add an additional growth rate term which takes a
+fraction of the current SnC count and multiplies it by a separate scalar
+representing SIS.
+
+```{r}
+model <- stan_model("snc_sis_model.stan")
+# Now actually compute posterior.
+fit_snc_sis_model <- sampling(
+  model,
+  data = data_snc,
+  iter = niter,
+  chains = 4,
+)
+```
+```{r}
+model
+```
 
 
+In this version of the model, our equation is:
+$$
+\dot{X} = \eta_1 + \eta_2 * L + \eta_3 * \alpha * t - \text{removal terms} + \text{noise}.
+$$
+
+```{r}
+pars=c('eta', 'beta', 'sigma', 'alpha', 'll', 'log_likelihood', 'lp__')
+print(fit_snc_sis_model, pars = pars)
+```
+```{r}
+pairs(fit_snc_sis_model, pars = pars)
+```
+
+```{r}
+stan_dens(fit_snc_sis_model, pars = pars, separate_chains = TRUE)
+```
+
+```{r}
+snc_sis_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+snc_sis_ll_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_model, pars = "pred_ll_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+colnames(snc_sis_counts_pred) <- make.names(colnames(snc_sis_counts_pred)) # to remove % in the col names
+colnames(snc_sis_ll_counts_pred) <- make.names(colnames(snc_sis_ll_counts_pred)) # to remove % in the col names
+
+ggplot(snc_sis_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_line(data = snc_sis_ll_counts_pred, mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    aes(
+      ymin=mean_abundances - stddev_abundances/2,
+      ymax=mean + stddev_abundances/2
+    ),
+    width=.2,
+    position=position_dodge(0.05)
+  ) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
+  labs(x = "Week", y = "SnC (normalized)")
+```
+
+Fortunately, since we're being Bayesian about all this, we can improve over
+the Alon paper's original model comparison by using Bayes Factors to compute
+odds ratios between our three models' marginal likelihoods (assuming equal
+prior probability between the two). 
+
+As we expected based on Karin et al, the SNC SR model is deemed much more
+probable than the USR model. Furthermore, the new SIS model
+is deemed ten times more likely than the SR model!
+Note that the Bayes factor measures, assuming
+our two models are denoted \( \mathcal{M}_1 \), \( \mathcal{M}_2 \):
+$$
+\frac{P(\mathcal{M}_1 \mid \text{data})}{P(\mathcal{M}_2 \mid \text{data})},
+$$
+so this posterior odds ratio accounts for the relative sizes of the parameter
+spaces used by the two models being compared.
+
+```{r}
+fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model, silent = T)
+fit_snc_sis_model.bridge <- bridge_sampler(fit_snc_sis_model, silent = T)
+fit_usr_model.bridge <- bridge_sampler(fit_usr_model, silent = T)
+bayes_factor(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge)
+bayes_factor(fit_snc_sis_model.bridge, fit_usr_model.bridge)
+post_prob(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge, fit_usr_model.bridge)
+```
+
+So it seems like the SIS model actually does fit the data quite well relative 
+to the SR and USR models as measured by Bayes factor...
 

@@ -30,35 +30,46 @@ transformed data {
 parameters {
   real<lower=0> eta[3];
   real<lower=0> beta[3];
-  real<lower=0> eps_inv;
+  real<lower=0> sigma;
+  real<lower=0> y_init[n_mice, 1];
 }
 transformed parameters{
   real y[n_mice, n_weeks, 1];
-  real eps = 1. / eps_inv;
   {
     real theta[6];
     theta[1:3] = eta;
     theta[4:6] = beta;
     for (i in 1:n_mice) {
-      y[i] = integrate_ode_rk45(snc, y0, t0, ts, theta, x_r, x_i);
+      y[i] = integrate_ode_rk45(snc, y_init[i], t0, ts, theta, x_r, x_i);
     }
   }
 }
 
 model {
   // Priors
-  for (i in 1:3) {
-    eta[i] ~ normal(0.5, 0.5);
-  }
-  for (i in 1:3) {
-    beta[i] ~ normal(0.5, 0.5);
-  }
-  eps_inv ~ gamma(2, 0);
+  eta[1:3] ~ normal(0.5, 0.5);
+  beta[1:3] ~ normal(0.5, 0.5);
+  sigma ~ lognormal(-1, 1);
   
-  // Sample cell counts for each mice.
+  // Sample cell counts for each mouse.
   for (i in 1:n_mice) {
+    y_init[i] ~ lognormal(log(1), 1);
+    cells[i] ~ lognormal(log(y[i, , 1]), sigma);
+  }
+}
+
+generated quantities {
+  real pred_cells[n_mice, n_weeks];
+  real pred_cells_means[n_weeks];
+  real log_likelihood = 0;
+  
+  for (i in 1:n_mice) {
+    pred_cells[i] = lognormal_rng(log(y[i, , 1]), sigma);
     for (j in 1:n_weeks) {
-      cells[i, j] ~ normal(y[i, j, 1], eps);
+      log_likelihood += lognormal_lpdf(cells[i, j] | log(y[i, j, 1]), sigma);
     }
+  }
+  for (i in 1:n_weeks) {
+    pred_cells_means[i] = mean(pred_cells[:, i]);
   }
 }
