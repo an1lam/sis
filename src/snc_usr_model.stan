@@ -46,8 +46,10 @@ transformed parameters{
 
 model {
   // Priors
-  eta[1:2] ~ normal(0.5, 0.5);
-  beta[1:2] ~ normal(0.5, 0.5);
+  eta[1] ~ normal(0, 0.78);
+  eta[2] ~ normal(0, 1);
+  beta[1] ~ normal(0, 0.78);
+  beta[2] ~ normal(0, 1);
   sigma ~ lognormal(-1, 1);
   
   // Sample cell counts for each mouse.

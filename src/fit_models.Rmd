@@ -6,6 +6,7 @@ output:
     df_print: paged
 params:
   data_dir: ../dat/
+  refit_models: T
 ---
 
 ```{r include=FALSE}
@@ -26,7 +27,7 @@ library(bridgesampling)
 library(rstan)
 library(gridExtra)
 rstan_options (auto_write = TRUE)
-options (mc.cores = parallel::detectCores ())
+options(mc.cores = parallel::detectCores())
 set.seed(3) # for reproductibility
 ```
 
@@ -49,11 +50,9 @@ snc_counts <- melt(
 snc_counts <- snc_counts %>%
   rename(week = "variable", mouse = "mouse.week")
 snc_counts$week <- map_int(snc_counts$week, function (week) { return(as.integer(substr(week, 2, str_length(week)))) })
-snc_counts$day <- snc_counts$week * 7
-length(unique(snc_counts$day))
+length(unique(snc_counts$week))
 ```
-Now we're going to reproduce Karin et al's fig. 2a, since it doesn't require any
-model-fitting, although we won't do the nice grey shading they did for now...
+
 ```{r}
 ggplot(
   data = snc_counts, 
@@ -64,18 +63,6 @@ ggplot(
 max(snc_counts$mouse)
 ```
 
-Next we're going to replicate the first part of Karin et al's fig 2c, which
-shows the mean and standard deviation of normalized senescent cell counts
-at each week time point.
-
-To normalize senescent cell counts, we adjust all counts to make the mean
-abundance across the first three measured time points -- 8, 16, 24 -- equal 1.
-To do so, we set
-$$
-\beta = \frac{1}{3n} \sum_{i=1}^n \sum_{j \in 8, 16, 24} c_{ij} = 1
-$$
-and divide all counts by it. In other words, normalize by the mean abundance
-from the first three weeks of data.
 
 ```{r}
 norm_const <- mean(
@@ -98,29 +85,27 @@ p <- ggplot(mean_stddev_abundances, aes(x=week, y=mean)) + geom_point() +
                  position=position_dodge(0.05))
 print(p)
 ```
-Notably our standard deviation bars seem larger than whatever Karin et al show
-in their full version of this figure (fig. 2c), but we seem to reproduce their
-standard error values based on their display of them in fig. 2d.
 
 # Fitting our three models on longitudinal data
+## Data processing
 ```{r}
 # Time series of SnC counts
 mice <- unique(snc_counts$mouse)
-days <- unique(snc_counts$day)
+weeks <- unique(snc_counts$week)
 n_mice <- length(mice)
-n_days <- length(days)
-snc_abundance <- matrix(nrow = n_mice, ncol=n_days)
+n_weeks <- length(weeks)
+snc_abundance <- matrix(nrow = n_mice, ncol=n_weeks)
 for (m in 1:n_mice) {
-  for (t in 1:n_days) {
+  for (t in 1:n_weeks) {
     mouse <- mice[m]
-    day <- days[t]
-    mouse_day_index <- which(snc_counts$mouse == mouse & snc_counts$day == day)[1]
-    snc_abundance[m, t] <- snc_counts$norm_abundance[mouse_day_index]
+    week <- weeks[t]
+    mouse_week_index <- which(snc_counts$mouse == mouse & snc_counts$week == week)[1]
+    snc_abundance[m, t] <- snc_counts$norm_abundance[mouse_week_index]
   }
 }
 
 # times
-t <- sort(days) # 8 hard-coded to match data
+t <- sort(weeks) # 8 hard-coded to match data
 t0 = 0
 
 # initial conditions
@@ -128,7 +113,7 @@ y0 = c(1)
 dim(y0) <- (1)
 
 # data for Stan
-data_snc <- list(n_days = n_days, n_mice = n_mice, y0 = y0, t0 = t0, ts = t, cells = snc_abundance)
+data_snc <- list(n_weeks = n_weeks, n_mice = n_mice, y0 = y0, t0 = t0, ts = t, cells = snc_abundance)
 
 saveRDS(snc_counts, "saved_fit/snc_counts.RDS")
 saveRDS(data_snc, "saved_fit/data_snc.RDS")
@@ -137,117 +122,100 @@ saveRDS(data_snc, "saved_fit/data_snc.RDS")
 niter <- 2000
 ```
 
+## MCMC sampling
+### SR model
 
 ```{r}
-model <- stan_model("snc_sr_model.stan")
-fit_snc_sr_model <- sampling(
-  model,
-  data = data_snc,
-  iter = niter,
-  chains = 4
-)
-saveRDS(fit_snc_sr_model, "saved_fit/fit_snc_sr_model.RDS")
+if (params$refit_models) {
+  model <- stan_model("snc_sr_model.stan")
+  fit_snc_sr_model <- sampling(
+    model,
+    data = data_snc,
+    iter = niter,
+    chains = 4
+  )
+  saveRDS(fit_snc_sr_model, "saved_fit/fit_snc_sr_model.RDS")
+} else {
+  fit_snc_sr_model <- readRDS("saved_fit/fit_snc_sr_model.RDS")
+}
 ```
 
-## Diagnosing model fit
+### USR model
+
 ```{r}
-pars=c('eta', 'beta', 'sigma', 'lp__', 'log_likelihood')
-print(fit_snc_sr_model, pars = pars, digits_summary = 6)
+if (params$refit_models) {
+  model <- stan_model("snc_usr_model.stan")
+  fit_snc_usr_model <- sampling(
+    model,
+    data = data_snc,
+    iter = niter,
+    chains = 4
+  )
+  saveRDS(fit_snc_usr_model, "saved_fit/fit_snc_usr_model.RDS")
+} else {
+  fit_snc_usr_model <- readRDS("saved_fit/fit_snc_usr_model.RDS")
+}
 ```
 
+### SIS model
 ```{r}
-pairs(fit_snc_sr_model, pars=pars)
+if (params$refit_models) {
+  model <- stan_model("snc_sis_model.stan")
+  fit_snc_sis_model <- sampling(
+    model,
+    data = data_snc,
+    iter = niter,
+    chains = 4,
+  )
+  saveRDS(fit_snc_sis_model, "saved_fit/snc_sis_model.RDS")
+} else {
+  fit_snc_sis_model <- readRDS("saved_fit/snc_sis_model.RDS")
+}
 ```
 
-
-Next, we can look at density plots for our posterior distribution to verify
-that the posterior distributions look uni-modal (assuming that's what we want)
-and relatively similar across chains. In this case, they do!
-
+## Fit diagnostics
 ```{r}
-stan_dens(fit_snc_sr_model, pars = pars, separate_chains = TRUE)
-```
-
-Now we can actually evaluate our SR model with respect to data. As a first-pass
-evaluation, we'll basically replicate Karin et al's fig. 2c with only
-predictions from the SR model included for now. As the graph shows, our model
-seems to capture the progression of SnC abundance growth as well or, in my
-opinion, better than the max. likelihood equivalent in Karin et al. Our
-Karin et al's but our 95% predictive intervals capture the variance
-(as measured by standard deviation) of the individual mouse estimates better 
-than their SR model does.
-
-```{r}
-snc_sr_counts_pred <- cbind(
-  as.data.frame(
-    summary(
-      fit_snc_sr_model, pars = "pred_cells_means", 
-      probs = c(0.05, 0.5, 0.95)
-    )$summary
-  ), 
-  t, 
-  mean_abundances,
-  stddev_abundances
-)
-colnames(snc_sr_counts_pred) <- make.names(colnames(snc_sr_counts_pred)) # to remove % in the col names
-ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
-  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
-  geom_line(mapping = aes(x = t, y = X50.)) + 
-  geom_point(mapping = aes(y = mean_abundances)) +
-  geom_errorbar(
-    aes(
-      ymin=mean_abundances - stddev_abundances/2,
-      ymax=mean_abundances + stddev_abundances/2
-    ),
-    width=.2,
-    position=position_dodge(0.05)
-  ) +
-  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
-  labs(x = "Week", y = "SnC (normalized)")
-```
-
-
-## Fitting the USR model
-Now, to enable us to validate that our comparison produces similar qualitative
-results to the original paper's, we're going to fit a second model. The biggest
-difference between this model and the first model is that lack of a saturated
-removal term. The saturated removal term in the prior model is intended to
-capture the phenomenon in which senescent cells become so abundant
-that the immune system becomes unable to efficiently remove them.
-```{r}
-model <- stan_model("snc_usr_model.stan")
-fit_usr_model <- sampling(
-  model,
-  data = data_snc,
-  iter = niter,
-  chains = 4
-)
-saveRDS(fit_usr_model, "saved_fit/fit_snc_usr_model.RDS")
-```
-
-
-## Diagnosing model fit
-We look at the same diagnostics as previously and again find that our
-chains have mixed and our \( n_{\text{eff}} \)s seem reasonable. Our
-posterior densities also again look (mostly) unimodal.
-
-```{r}
-pars=c('eta', 'beta', 'sigma', 'log_likelihood', 'lp__')
-print(fit_usr_model, pars = pars)
+sr_pars=c('eta', 'beta', 'sigma', 'lp__', 'log_likelihood')
+print(fit_snc_sr_model, pars = sr_pars, digits_summary = 4)
 ```
 
 ```{r}
-pairs(fit_usr_model, pars = pars)
+usr_pars=c('eta', 'beta', 'sigma', 'log_likelihood', 'lp__')
+print(fit_snc_usr_model, pars = usr_pars, digits_summary = 4)
 ```
 
 ```{r}
-stan_dens(fit_usr_model, pars = pars, separate_chains = TRUE)
+sis_pars=c('eta', 'beta', 'sigma', 'alpha', 'll', 'log_likelihood', 'lp__')
+print(fit_snc_sis_model, pars = sis_pars, digits_summary = 4)
 ```
 
-Finally, we can again look at how well our posterior intervals capture
-the true data points. To make qualitative comparison with the prior model easier
-we plot both model's fits on the graph.
 
+```{r}
+pairs(fit_snc_sr_model, pars=sr_pars)
+```
+
+```{r}
+pairs(fit_snc_usr_model, pars = usr_pars)
+```
+
+```{r}
+pairs(fit_snc_sis_model, pars = sis_pars)
+```
+
+
+```{r}
+stan_dens(fit_snc_sr_model, pars = sr_pars, separate_chains = TRUE)
+```
+
+```{r}
+stan_dens(fit_snc_usr_model, pars = usr_pars, separate_chains = TRUE)
+```
+
+```{r}
+stan_dens(fit_snc_sis_model, pars = sis_pars, separate_chains = TRUE)
+```
+
+## Trajectory plots
 ```{r}
 snc_sr_counts_pred <- cbind(
   as.data.frame(
@@ -263,7 +231,29 @@ snc_sr_counts_pred <- cbind(
 snc_usr_counts_pred <- cbind(
   as.data.frame(
     summary(
-      fit_usr_model, pars = "pred_cells_means", 
+      fit_snc_usr_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+snc_sis_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_model, pars = "pred_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t, 
+  mean_abundances,
+  stddev_abundances
+)
+snc_sis_ll_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_model, pars = "pred_ll_cells_means", 
       probs = c(0.05, 0.5, 0.95)
     )$summary
   ), 
@@ -273,6 +263,10 @@ snc_usr_counts_pred <- cbind(
 )
 colnames(snc_sr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
 colnames(snc_usr_counts_pred) <- make.names(colnames(snc_usr_counts_pred)) # to remove % in the col names
+colnames(snc_sis_counts_pred) <- make.names(colnames(snc_sis_counts_pred)) # to remove % in the col names
+colnames(snc_sis_ll_counts_pred) <- make.names(colnames(snc_sis_ll_counts_pred)) # to remove % in the col names
+
+
 p_usr <- ggplot(snc_usr_counts_pred, mapping = aes(x = t)) +
   geom_ribbon(data = snc_usr_counts_pred, aes(ymin = X5., ymax = X95.), fill = "blue", alpha = 0.6) +
   geom_line(mapping = aes(x = t, y = X50.)) + 
@@ -302,164 +296,34 @@ p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
   ) +
   scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
   labs(title = "Saturated Removal Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
-ggarrange(p_usr, p_sr)
-```
-
-Interestingly, our USR graph looks much better than the one in the Alon paper
-with respect to matching the observations.
-
-
-# Senescence-Induced Senescence Model
-The SIS model seeks to test a hypothesis that senescent cells can be coarsely
-broken down into long-lived and short-lived senescent cells and that these
-long-lived cells can induce healthy cells to become (short-lived type) 
-senescent.
-
-In order to test this, we add an additional growth rate term which takes a
-fraction of the current SnC count and multiplies it by a separate scalar
-representing SIS.
-
-```{r}
-model <- stan_model("snc_sis_model.stan")
-# Now actually compute posterior.
-fit_snc_sis_model <- sampling(
-  model,
-  data = data_snc,
-  iter = niter,
-  chains = 4,
-)
-saveRDS(fit_snc_sis_model, "saved_fit/snc_sis_model.RDS")
-```
-
-
-
-In this version of the model, our equation is:
-$$
-\dot{X} = \eta_1 + \eta_2 * L + \eta_2 * \alpha * t - \text{removal terms} + \text{noise}.
-$$
-
-```{r}
-pars=c('eta', 'beta', 'sigma', 'alpha', 'll', 'log_likelihood', 'lp__')
-print(fit_snc_sis_model, pars = pars)
-```
-```{r}
-pairs(fit_snc_sis_model, pars = pars)
-```
-
-```{r}
-stan_dens(fit_snc_sis_model, pars = pars, separate_chains = TRUE)
-```
-
-```{r}
-snc_sis_counts_pred <- cbind(
-  as.data.frame(
-    summary(
-      fit_snc_sis_model, pars = "pred_cells_means", 
-      probs = c(0.05, 0.5, 0.95)
-    )$summary
-  ), 
-  t, 
-  mean_abundances,
-  stddev_abundances
-)
-snc_sis_ll_counts_pred <- cbind(
-  as.data.frame(
-    summary(
-      fit_snc_sis_model, pars = "pred_ll_cells_means", 
-      probs = c(0.05, 0.5, 0.95)
-    )$summary
-  ), 
-  t, 
-  mean_abundances,
-  stddev_abundances
-)
-snc_sis_ll_counts_pred$mean_abundances
-snc_sis_ll_counts_pred$stddev_abundances
-snc_sis_ll_counts_pred$mean_abundances + snc_sis_ll_counts_pred$stddev_abundances
-snc_sis_ll_counts_pred$mean_abundances - snc_sis_ll_counts_pred$stddev_abundances
-colnames(snc_sis_counts_pred) <- make.names(colnames(snc_sis_counts_pred)) # to remove % in the col names
-colnames(snc_sis_ll_counts_pred) <- make.names(colnames(snc_sis_ll_counts_pred)) # to remove % in the col names
-
-ggplot(snc_sis_counts_pred, mapping = aes(x = t)) +
-  geom_ribbon(aes(ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+p_sis <- ggplot(snc_sis_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
   geom_line(mapping = aes(x = t, y = X50.)) + 
-  geom_line(data = snc_sis_ll_counts_pred, mapping = aes(x = t, y = X50.)) + 
-  geom_point(mapping = aes(x = t, y = mean_abundances)) +
+  geom_line(data = snc_sis_ll_counts_pred, aes(x = t, y = X50.), col = "grey") +
+  geom_point(mapping = aes(y = mean_abundances)) +
   geom_errorbar(
     aes(
-      x = t,
-      ymin=mean_abundances - stddev_abundances,
-      ymax=mean_abundances + stddev_abundances
+      ymin=mean_abundances - stddev_abundances/2,
+      ymax=mean_abundances + stddev_abundances/2
     ),
-    width=1,
+    width=.2,
     position=position_dodge(0.05)
   ) +
   scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
-  labs(x = "Week", y = "SnC (normalized)")
-```
-
-```{r}
-snc_sis_counts_pred <- cbind(
-  as.data.frame(
-    summary(
-      fit_snc_sis_model, pars = "pred_cells", 
-      probs = c(0.05, 0.5, 0.95)
-    )$summary
-  ),
-  as.data.frame(
-    summary(
-      fit_snc_sis_model, pars = "pred_ll_cells_means", 
-      probs = c(0.05, 0.5, 0.95)
-    )$summary
-  ), 
-  t, 
-  mean_abundances,
-  stddev_abundances
-)
-ggplot(
-  data = snc_sis_counts_pred, 
-  aes(x = week, y = pred_cells_means, color = mouse, group = mouse)
-) +
-  xlab("Week") + ylab(TeX("$ TBL \\times 10^5 $")) +
-  scale_color_gradientn(colours = rainbow(5)) + geom_line() + geom_point()
-max(snc_counts$mouse)
+  labs(title = "SIS Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+ggarrange(p_usr, p_sr, p_sis)
 ```
 
 
-Fortunately, since we're being Bayesian about all this, we can improve over
-the Alon paper's original model comparison by using Bayes Factors to compute
-odds ratios between our three models' marginal likelihoods (assuming equal
-prior probability between the two). 
-
-As we expected based on Karin et al, the SNC SR model is deemed much more
-probable than the USR model. Furthermore, the new SIS model
-is deemed ten times more likely than the SR model!
-Note that the Bayes factor measures, assuming
-our two models are denoted \( \mathcal{M}_1 \), \( \mathcal{M}_2 \):
-$$
-\frac{P(\mathcal{M}_1 \mid \text{data})}{P(\mathcal{M}_2 \mid \text{data})},
-$$
-so this posterior odds ratio accounts for the relative sizes of the parameter
-spaces used by the two models being compared.
-
+# Model comparison
 ```{r}
 fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model, silent = T)
 fit_snc_sis_model.bridge <- bridge_sampler(fit_snc_sis_model, silent = T)
-fit_usr_model.bridge <- bridge_sampler(fit_usr_model, silent = T)
+fit_snc_usr_model.bridge <- bridge_sampler(fit_snc_usr_model, silent = T)
 bayes_factor(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge)
-bayes_factor(fit_snc_sis_model.bridge, fit_usr_model.bridge)
-bayes_factor(fit_snc_sr_model.bridge, fit_usr_model.bridge)
-post_prob(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge, fit_usr_model.bridge)
+bayes_factor(fit_snc_sis_model.bridge, fit_snc_usr_model.bridge)
+bayes_factor(fit_snc_sr_model.bridge, fit_snc_usr_model.bridge)
+post_prob(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge, fit_snc_usr_model.bridge)
 ```
 
-So it seems like the SIS model actually does fit the data quite well relative 
-to the SR and USR models as measured by Bayes factor...
-
-```{r}
-
-# Load the functions
-library(shiny)
-library(shinycssloaders)
-runGitHub('jhelvy/stanTuneR')
-```
 

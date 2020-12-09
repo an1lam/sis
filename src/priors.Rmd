@@ -40,7 +40,9 @@ c_dark_trans <- c("#8F272780")
 c_green_trans <- c("#00FF0080")
 ```
 
-# Half-normal prior
+# Half-normal priors
+## For long-lived SnC initial abundance
+Key criterion: have 99% probability below .5.
 ```{r, echo=FALSE}
 stan(file='half_normal_prior_tune.stan', iter=1, warmup=0, chains=1,
      seed=4838282, algorithm="Fixed_param")
@@ -60,4 +62,54 @@ dens <- c(dens, 0, 0)
 polygon(lambda99, dens, col=c_dark, border=NA)
 ```
 
+## For growth rates
+### Initial SnC growth rate
+Our growth rate units are in AUs per week. A growth rate of 2 would therefore
+imply a doubling in abundance per week. Similar to in the prior case,
+we can assume there's a 95% chance that the growth rate's below 4
+since we can assume turnover is at least a few days based on the literature
+and therefore a growth rate of 2 would lead to exponential growth explosion.
+```{r}
+stan(file='prior_tune_2.stan', iter=1, warmup=0, chains=1,
+     seed=4838282, algorithm="Fixed_param")
+```
+
+```{r}
+lambda <- seq(0, 5, 0.0005)
+
+plot(lambda, dnorm(lambda, 0, .78), type="l", col=c_dark_highlight, lwd=2,
+     xlab="lambda", ylab="Prior Density", yaxt='n')
+
+lambda99 <- seq(0, 5, 0.001)
+dens <- dnorm(lambda99, 0, .78)
+lambda99 <- c(lambda99, 1, 0)
+dens <- c(dens, 0, 0)
+
+polygon(lambda99, dens, col=c_dark, border=NA)
+```
+
+### For long-lived SnC growth rate (\( \alpha \))
+Key criteria: LL SnC abundance below 1 at the end of iteration, implying
+\( \alpha <= .02 \). 
+```{r}
+stan(file='prior_tune_3.stan', iter=1, warmup=0, chains=1,
+     seed=4838282, algorithm="Fixed_param")
+```
+
+
+```{r}
+lambda <- seq(0, .5, 0.0005)
+
+plot(lambda, dnorm(lambda, 0, .05), type="l", col=c_dark_highlight, lwd=2,
+     xlab="lambda", ylab="Prior Density", yaxt='n')
+
+lambda99 <- seq(0, .5, 0.001)
+dens <- dnorm(lambda99, 0, .05)
+lambda99 <- c(lambda99, 1, 0)
+dens <- c(dens, 0, 0)
+
+polygon(lambda99, dens, col=c_dark, border=NA)
+```
+
+### Long-lived senescent cell growth rates
 
