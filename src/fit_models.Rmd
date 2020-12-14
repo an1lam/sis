@@ -10,6 +10,7 @@ params:
 ---
 
 ```{r include=FALSE}
+library(bayesplot)
 library(brms)
 library(dplyr)
 library(foreach)
@@ -19,6 +20,7 @@ library(latex2exp)
 library(loo)
 library(purrr)
 library(reshape2)
+library(scales)
 library(stringr)
 library(tidyverse)
 
@@ -31,7 +33,8 @@ options(mc.cores = parallel::detectCores())
 set.seed(3) # for reproductibility
 ```
 
-# Loading and visualizing the data
+# Longitudinal Data
+## Loading and visualizing the data
 ```{r}
 snc_counts_fname <- str_c(
   params$data_dir, "raw", "senescent_cells_and_the_dynamics_of_aging__fig_2.csv",
@@ -86,6 +89,11 @@ p <- ggplot(mean_stddev_abundances, aes(x=week, y=mean)) + geom_point() +
 print(p)
 ```
 
+```{r}
+mean_abundances[2]
+```
+
+
 # Fitting our three models on longitudinal data
 ## Data processing
 ```{r}
@@ -107,13 +115,26 @@ for (m in 1:n_mice) {
 # times
 t <- sort(weeks) # 8 hard-coded to match data
 t0 = 0
+t
 
 # initial conditions
-y0 = c(1)
+y0 <- c(1)
 dim(y0) <- (1)
+y0_oos_young <- mean_abundances[1] + 50;
+dim(y0_oos_young) <- 1
 
 # data for Stan
-data_snc <- list(n_weeks = n_weeks, n_mice = n_mice, y0 = y0, t0 = t0, ts = t, cells = snc_abundance)
+data_snc <- list(
+  n_weeks = n_weeks, 
+  n_mice = n_mice, 
+  y0 = y0, 
+  t0 = t0, 
+  ts = t, 
+  cells = snc_abundance,
+  n_weeks_oos_young = 5.,
+  y0_oos_young = y0_oos_young,
+  t0_oos_young = 8.
+)
 
 saveRDS(snc_counts, "saved_fit/snc_counts.RDS")
 saveRDS(data_snc, "saved_fit/data_snc.RDS")
@@ -126,10 +147,10 @@ niter <- 2000
 ### SR model
 
 ```{r}
+snc_sr_model <- stan_model("snc_sr_model.stan")
 if (params$refit_models) {
-  model <- stan_model("snc_sr_model.stan")
   fit_snc_sr_model <- sampling(
-    model,
+    snc_sr_model,
     data = data_snc,
     iter = niter,
     chains = 4
@@ -274,8 +295,8 @@ p_usr <- ggplot(snc_usr_counts_pred, mapping = aes(x = t)) +
   geom_errorbar(
     data = snc_sr_counts_pred, 
     aes(
-      ymin=mean_abundances - stddev_abundances/2,
-      ymax=mean_abundances + stddev_abundances/2,
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances
     ),
     width=.2,
     position=position_dodge(0.05),
@@ -288,8 +309,8 @@ p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
   geom_point(mapping = aes(y = mean_abundances)) +
   geom_errorbar(
     aes(
-      ymin=mean_abundances - stddev_abundances/2,
-      ymax=mean_abundances + stddev_abundances/2
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances
     ),
     width=.2,
     position=position_dodge(0.05)
@@ -299,12 +320,12 @@ p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
 p_sis <- ggplot(snc_sis_counts_pred, mapping = aes(x = t)) +
   geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
   geom_line(mapping = aes(x = t, y = X50.)) + 
-  geom_line(data = snc_sis_ll_counts_pred, aes(x = t, y = X50.), col = "grey") +
+  geom_line(data = snc_sis_ll_counts_pred, aes(x = t, y = X50.), col = "green") +
   geom_point(mapping = aes(y = mean_abundances)) +
   geom_errorbar(
     aes(
-      ymin=mean_abundances - stddev_abundances/2,
-      ymax=mean_abundances + stddev_abundances/2
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances
     ),
     width=.2,
     position=position_dodge(0.05)
@@ -314,10 +335,32 @@ p_sis <- ggplot(snc_sis_counts_pred, mapping = aes(x = t)) +
 ggarrange(p_usr, p_sr, p_sis)
 ```
 
+```{r}
+snc_sr_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sr_model, pars = "pred_cells_oos_young", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ), 
+  t = seq(from = 9, to = 13)
+)
+colnames(snc_sr_counts_pred) <- make.names(colnames(snc_sr_counts_pred)) # to remove % in the col names
+
+p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 13)) +
+  labs(title = "Saturated Removal Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+p_sr
+```
+
+
+
 
 # Model comparison
 ```{r}
-fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model, silent = T)
+fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model)
 fit_snc_sis_model.bridge <- bridge_sampler(fit_snc_sis_model, silent = T)
 fit_snc_usr_model.bridge <- bridge_sampler(fit_snc_usr_model, silent = T)
 bayes_factor(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge)
@@ -325,5 +368,354 @@ bayes_factor(fit_snc_sis_model.bridge, fit_snc_usr_model.bridge)
 bayes_factor(fit_snc_sr_model.bridge, fit_snc_usr_model.bridge)
 post_prob(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge, fit_snc_usr_model.bridge)
 ```
+
+# Perturbed Data
+## Loading and visualizing the data
+```{r}
+snc_counts_fname <- str_c(
+  params$data_dir, "raw", "senescent_cells_and_the_dynamics_of_aging__fig_3.csv",
+  sep="/"
+)
+raw_perturbed_snc_counts <- read.csv(snc_counts_fname, header=TRUE)
+long_pert_snc_counts <- raw_perturbed_snc_counts[
+  (raw_perturbed_snc_counts$group == "BLEO_YNG") |
+  (raw_perturbed_snc_counts$group == "BLEO_OLD"),
+]
+long_pert_snc_counts$day_after_treatment <- map_int(
+  long_pert_snc_counts$day_after_treatment, 
+  function (day) { return(as.integer(substr(day, 1, str_length(week)))) }
+)
+long_pert_snc_counts$week_after_treatment <- map_dbl(
+  long_pert_snc_counts$day_after_treatment, 
+  function (day) { return(as.numeric(as.integer(substr(day, 1, str_length(day))) / 7)) }
+)
+init_pert_snc_counts <- raw_perturbed_snc_counts[
+  (raw_perturbed_snc_counts$group == "PBS_YNG") |
+  (raw_perturbed_snc_counts$group == "PBS_OLD"),
+]
+t0_young <- 16
+t0_old <- 94
+
+init_pert_snc_counts
+long_pert_snc_counts
+```
+
+```{r}
+long_pert_snc_counts_young <- long_pert_snc_counts[long_pert_snc_counts$group == "BLEO_YNG",]
+long_pert_snc_counts_old <- long_pert_snc_counts[long_pert_snc_counts$group == "BLEO_OLD",]
+
+mean_abundances_perturb_young <- aggregate(
+  long_pert_snc_counts_young$SnC, 
+  list(long_pert_snc_counts_young$week_after_treatment), 
+  mean, na.rm = T
+)$x
+mean_abundances_perturb_old <- aggregate(
+  long_pert_snc_counts_old$SnC, 
+  list(long_pert_snc_counts_old$week_after_treatment), 
+  mean, na.rm = T
+)$x
+stddev_abundances_perturb_young <- aggregate(
+  long_pert_snc_counts_young$SnC, 
+  list(long_pert_snc_counts_young$week_after_treatment), 
+  sd, na.rm = T
+)$x
+stddev_abundances_perturb_old <- aggregate(
+  long_pert_snc_counts_old$SnC, 
+  list(long_pert_snc_counts_old$week_after_treatment), 
+  sd, na.rm = T
+)$x
+
+mean_stddev_abundances_perturb_young <- data.frame(
+  mean = mean_abundances_perturb_young,
+  stddev = stddev_abundances_perturb_young,
+  week = unique(long_pert_snc_counts_young$week_after_treatment)
+)
+mean_stddev_abundances_perturb_young <- data.frame(
+  mean = mean_abundances_perturb_young,
+  stddev = stddev_abundances_perturb_young,
+  week = unique(long_pert_snc_counts_young$week_after_treatment)
+)
+p <- ggplot(mean_stddev_abundances_perturb_young, aes(x=week, y=mean)) + geom_point() +
+    geom_errorbar(aes(ymin=mean-stddev/2, ymax=mean+stddev/2), width=.2,
+                 position=position_dodge(0.05))
+p
+```
+
+
+```{r}
+ggplot(
+  data = long_pert_snc_counts, 
+  aes(x = day_after_treatment, y = SnC, color = group)
+) +
+  xlab("Day After Treatment") + ylab("SnC Abundance (Normalized)") +
+  geom_point() +
+  scale_y_continuous(trans = log_trans(), breaks = c(0.1, 1, 5, 20, 50))
+```
+
+## Half-life calculation
+```{r}
+beta_sr_summary <- summary(
+  fit_snc_sr_model, 
+  pars = c("beta")
+)$summary
+
+# Young
+beta_sr_mean <- beta_sr_summary[, c("mean")]
+half_life_sr_mean_young <- 1 / (
+  mean(beta_sr_mean[1] / (1 / beta_sr_mean[2] + init_pert_snc_counts$SnC[init_pert_snc_counts$group == "PBS_YNG"])) * (log(2)) ** (-1)
+)
+half_life_sr_mean_young
+
+# Old
+beta_sr_mean <- beta_sr_summary[, c("mean")]
+half_life_sr_mean_old <- 1 / (
+  mean(beta_sr_mean[1] / (1 / beta_sr_mean[2] + init_pert_snc_counts$SnC[init_pert_snc_counts$group == "PBS_OLD"])) * (log(2)) ** (-1)
+)
+half_life_sr_mean_old
+```
+
+## Predicting pulse data results
+```{r}
+t0_young <- 16
+t0_old <- 94
+
+# initial conditions for both cases
+y0_young <- 50
+dim(y0_young) <- 1
+y0_old <- 50
+dim(y0_old) <- 1
+
+eta_sr_param <- summary(
+  fit_snc_sr_model, 
+  pars = c("eta[1]", "eta[2]")
+)$summary[, c("mean")]
+
+
+# data for Stan
+snc_abundance_young <- data.frame(long_pert_snc_counts[
+  long_pert_snc_counts$group == "BLEO_YNG",
+])
+weeks_young <- unique(snc_abundance_young$week_after_treatment)
+t_young <- weeks_young + t0_young
+n_weeks_young <- length(weeks_young)
+cells_young <- snc_abundance_young$SnC
+tt_young <- match(snc_abundance_young$week_after_treatment, weeks_young)
+snc_abundance_old <- data.frame(long_pert_snc_counts[
+  long_pert_snc_counts$group == "BLEO_OLD",
+])
+weeks_old <- unique(snc_abundance_old$week_after_treatment)
+n_weeks_old <- length(weeks_old)
+n_mice_young <- 0
+n_mice_old <- 0
+for (w in weeks_young) {
+  counts <- snc_abundance_young$SnC[snc_abundance_young$week_after_treatment == w]
+  n_mice_young <- max(n_mice_young, length(counts))
+}
+for (w in weeks_old) {
+  counts <- snc_abundance_old$SnC[snc_abundance_old$week_after_treatment == w]
+  n_mice_old <- max(n_mice_old, length(counts))
+}
+
+t_old <- weeks_old + t0_old
+cells_old <- snc_abundance_old$SnC
+tt_old <- match(snc_abundance_old$week_after_treatment, weeks_old)
+data_snc_sr_young <- list(
+  n_weeks = n_weeks_young,
+  n_mice = n_mice_young,
+  cells = cells_young, 
+  n_obs = length(cells_young), 
+  tt = tt_young, 
+  y0 = y0_young, 
+  t0 = t0_young, 
+  ts = t_young, 
+  eta = eta_sr_param
+)
+data_snc_sr_old <- list(
+  n_weeks = n_weeks_old,
+  n_mice = n_mice_old,
+  cells = cells_old,
+  n_obs = length(cells_old),
+  tt = tt_old,
+  y0 = y0_old,
+  t0 = t0_old,
+  ts = t_old,
+  eta = eta_sr_param
+)
+
+# SIS stan pre-processing
+eta_sis_param <- summary(
+  fit_snc_sis_model, 
+  pars = c("eta[1]", "eta[2]")
+)$summary[, c("mean")]
+alpha_sis_param <- summary(
+  fit_snc_sis_model,
+  pars = c("alpha")
+)$summary[, c("mean")]
+# data for Stan
+data_snc_sis_young <- list(
+  n_weeks = n_weeks_young, 
+  n_mice = n_mice_young,
+  cells = cells_young, 
+  n_obs = length(cells_young), 
+  tt = tt_young, 
+  y0 = y0_young, 
+  t0 = t0_young, 
+  ts = t_young, 
+  eta = eta_sis_param,
+  alpha = alpha_sis_param
+)
+data_snc_sis_old <- list(
+  n_weeks = n_weeks_old,
+  cells = cells_old,
+  n_mice = n_mice_old,
+  n_obs = length(cells_old),
+  tt = tt_old,
+  y0 = y0_old,
+  t0 = t0_old,
+  ts = t_old,
+  eta = eta_sis_param,
+  alpha = alpha_sis_param
+)
+
+# number of MCMC steps
+niter <- 4000
+```
+
+
+
+```{r}
+snc_sr_sim_model <- stan_model("snc_sr_model_pulse_sim.stan")
+fit_snc_sr_sim_young <- sampling(
+  snc_sr_sim_model,
+  data = data_snc_sr_young,
+  iter = niter,
+  chains = 4
+)
+fit_snc_sr_sim_old <- sampling(
+  snc_sr_sim_model,
+  data = data_snc_sr_old,
+  iter = niter,
+  chains = 4
+)
+```
+
+```{r}
+snc_sis_sim_model <- stan_model("snc_sis_model_pulse_sim.stan")
+fit_snc_sis_sim_young <- sampling(
+  snc_sis_sim_model,
+  data = data_snc_sis_young,
+  iter = niter,
+  chains = 4
+)
+fit_snc_sis_sim_old <- sampling(
+  snc_sis_sim_model,
+  data = data_snc_sis_old,
+  iter = niter,
+  chains = 4
+)
+```
+
+```{r}
+sr_pars=c('beta', 'sigma', 'lp__', 'pred_cells_means')
+print(fit_snc_sr_sim_young, pars = sr_pars, digits_summary = 4)
+print(fit_snc_sr_sim_old, pars = sr_pars, digits_summary = 4)
+```
+
+
+```{r}
+sis_pars <- c('beta', 'll', 'sigma', 'lp__', 'pred_cells_means')
+print(fit_snc_sis_sim_young, pars = sis_pars, digits_summary = 4)
+print(fit_snc_sis_sim_old, pars = sis_pars, digits_summary = 4)
+```
+
+
+```{r}
+snc_sr_sim_counts_pred_young <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sr_sim_young, pars = "pred_cells_means", 
+      probs = c(0.25, 0.5, 0.75)
+    )$summary
+  ), 
+  t_young,
+  mean_abundances_perturb_young,
+  stddev_abundances_perturb_young
+)
+snc_sr_sim_counts_pred_old <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sr_sim_old, pars = "pred_cells_means", 
+      probs = c(0.25, 0.5, 0.75)
+    )$summary
+  ), 
+  t_old,
+  mean_abundances_perturb_old,
+  stddev_abundances_perturb_old
+)
+snc_sis_sim_counts_pred_young <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_sim_young, pars = "pred_cells_means", 
+      probs = c(0.25, 0.5, 0.75)
+    )$summary
+  ), 
+  t_young,
+  mean_abundances_perturb_young,
+  stddev_abundances_perturb_young
+)
+snc_sis_sim_counts_pred_old <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_sim_old, pars = "pred_cells_means", 
+      probs = c(0.25, 0.5, 0.75)
+    )$summary
+  ), 
+  t_old,
+  mean_abundances_perturb_old,
+  stddev_abundances_perturb_old
+)
+colnames(snc_sr_sim_counts_pred_young) <- make.names(colnames(snc_sr_sim_counts_pred_young)) # to remove % in the col names
+colnames(snc_sr_sim_counts_pred_old) <- make.names(colnames(snc_sr_sim_counts_pred_old)) # to remove % in the col names
+colnames(snc_sis_sim_counts_pred_young) <- make.names(colnames(snc_sis_sim_counts_pred_young)) # to remove % in the col names
+colnames(snc_sis_sim_counts_pred_old) <- make.names(colnames(snc_sis_sim_counts_pred_old)) # to remove % in the col names
+
+p_sr_sim_young <- ggplot(snc_sr_sim_counts_pred_young, mapping = aes(x = t_young)) +
+  geom_ribbon(aes( ymin = X25., ymax = X75.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t_young, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances_perturb_young)) +
+  scale_x_continuous(name = "Week", breaks=t_young, labels=scales::number_format(accuracy = 0.1), limits = c(min(t_young), max(t_young))) +
+  labs(title = "Saturated Removal Model Predictions (Young)", x = "Week", y = "SnC (normalized)", color = "name")
+p_sr_sim_old <- ggplot(snc_sr_sim_counts_pred_old, mapping = aes(x = t_old)) +
+  geom_ribbon(aes( ymin = X25., ymax = X75.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t_old, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances_perturb_old)) +
+  scale_x_continuous(name = "Week", breaks=t_old, labels=scales::number_format(accuracy = 0.1), limits = c(min(t_old), max(t_old))) +
+  labs(title = "Saturated Removal Model Predictions (Old)", x = "Week", y = "SnC (normalized)", color = "name")
+p_sis_sim_young <- ggplot(snc_sis_sim_counts_pred_young, mapping = aes(x = t_young)) +
+  geom_ribbon(aes( ymin = X25., ymax = X75.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t_young, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances_perturb_young)) +
+  scale_x_continuous(name = "Week", breaks=t_young, labels=scales::number_format(accuracy = 0.1), limits = c(min(t_young), max(t_young))) +
+  labs(title = "Saturated Removal Model Predictions (Young)", x = "Week", y = "SnC (normalized)", color = "name")
+p_sis_sim_old <- ggplot(snc_sis_sim_counts_pred_old, mapping = aes(x = t_old)) +
+  geom_ribbon(aes( ymin = X25., ymax = X75.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t_old, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances_perturb_old)) +
+  scale_x_continuous(name = "Week", breaks=t_old, labels=scales::number_format(accuracy = 0.1), limits = c(min(t_old), max(t_old))) +
+  labs(title = "Saturated Removal Model Predictions (Old)", x = "Week", y = "SnC (normalized)", color = "name")
+
+ggarrange(p_sr_sim_young, p_sr_sim_old, p_sis_sim_young, p_sis_sim_old)
+```
+## Model Comparison
+```{r}
+fit_snc_sr_sim_young.bridge <- bridge_sampler(fit_snc_sr_sim_young)
+fit_snc_sr_sim_old.bridge <- bridge_sampler(fit_snc_sr_sim_old)
+fit_snc_sis_sim_young.bridge <- bridge_sampler(fit_snc_sis_sim_young)
+fit_snc_sis_sim_old.bridge <- bridge_sampler(fit_snc_sis_sim_old)
+
+bayes_factor(fit_snc_sis_sim_young.bridge, fit_snc_sr_sim_young.bridge)
+bayes_factor(fit_snc_sis_sim_old.bridge, fit_snc_sr_sim_old.bridge)
+```
+
 
 
