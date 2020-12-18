@@ -6,7 +6,7 @@ output:
     df_print: paged
 params:
   data_dir: ../dat/
-  refit_models: T
+  refit_models: F
 ---
 
 ```{r include=FALSE}
@@ -103,6 +103,7 @@ weeks <- unique(snc_counts$week)
 n_mice <- length(mice)
 n_weeks <- length(weeks)
 snc_abundance <- matrix(nrow = n_mice, ncol=n_weeks)
+
 for (m in 1:n_mice) {
   for (t in 1:n_weeks) {
     mouse <- mice[m]
@@ -153,13 +154,16 @@ if (params$refit_models) {
     snc_sr_model,
     data = data_snc,
     iter = niter,
-    chains = 4
+    chains = 4,
+    control = list(adapt_delta = .99)
   )
   saveRDS(fit_snc_sr_model, "saved_fit/fit_snc_sr_model.RDS")
 } else {
   fit_snc_sr_model <- readRDS("saved_fit/fit_snc_sr_model.RDS")
 }
 ```
+
+
 
 ### USR model
 
@@ -170,7 +174,8 @@ if (params$refit_models) {
     model,
     data = data_snc,
     iter = niter,
-    chains = 4
+    chains = 4,
+    control = list(adapt_delta = .99)
   )
   saveRDS(fit_snc_usr_model, "saved_fit/fit_snc_usr_model.RDS")
 } else {
@@ -187,6 +192,7 @@ if (params$refit_models) {
     data = data_snc,
     iter = niter,
     chains = 4,
+    control = list(adapt_delta = .99)
   )
   saveRDS(fit_snc_sis_model, "saved_fit/snc_sis_model.RDS")
 } else {
@@ -199,6 +205,7 @@ if (params$refit_models) {
 sr_pars=c('eta', 'beta', 'sigma', 'lp__', 'log_likelihood')
 print(fit_snc_sr_model, pars = sr_pars, digits_summary = 4)
 ```
+
 
 ```{r}
 usr_pars=c('eta', 'beta', 'sigma', 'log_likelihood', 'lp__')
@@ -214,6 +221,7 @@ print(fit_snc_sis_model, pars = sis_pars, digits_summary = 4)
 ```{r}
 pairs(fit_snc_sr_model, pars=sr_pars)
 ```
+
 
 ```{r}
 pairs(fit_snc_usr_model, pars = usr_pars)
@@ -335,31 +343,11 @@ p_sis <- ggplot(snc_sis_counts_pred, mapping = aes(x = t)) +
 ggarrange(p_usr, p_sr, p_sis)
 ```
 
-```{r}
-snc_sr_counts_pred <- cbind(
-  as.data.frame(
-    summary(
-      fit_snc_sr_model, pars = "pred_cells_oos_young", 
-      probs = c(0.05, 0.5, 0.95)
-    )$summary
-  ), 
-  t = seq(from = 9, to = 13)
-)
-colnames(snc_sr_counts_pred) <- make.names(colnames(snc_sr_counts_pred)) # to remove % in the col names
-
-p_sr <- ggplot(snc_sr_counts_pred, mapping = aes(x = t)) +
-  geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
-  geom_line(mapping = aes(x = t, y = X50.)) +
-  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 13)) +
-  labs(title = "Saturated Removal Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
-p_sr
-```
-
-
-
 
 # Model comparison
+## Bayes Factor and LOO-CV calculations
 ```{r}
+if (params$refit_models) {
 fit_snc_sr_model.bridge <- bridge_sampler(fit_snc_sr_model)
 fit_snc_sis_model.bridge <- bridge_sampler(fit_snc_sis_model, silent = T)
 fit_snc_usr_model.bridge <- bridge_sampler(fit_snc_usr_model, silent = T)
@@ -367,7 +355,171 @@ bayes_factor(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge)
 bayes_factor(fit_snc_sis_model.bridge, fit_snc_usr_model.bridge)
 bayes_factor(fit_snc_sr_model.bridge, fit_snc_usr_model.bridge)
 post_prob(fit_snc_sis_model.bridge, fit_snc_sr_model.bridge, fit_snc_usr_model.bridge)
+}
 ```
+
+```{r}
+ll_sr <- extract_log_lik(fit_snc_sr_model, parameter_name= "log_likelihood")
+rel_n_eff_sr <- relative_eff(exp(ll_sr), chain_id = rep(1:1, each = 4000))
+
+loo(ll_sr, r_eff = rel_n_eff_sr)
+rel_n_eff_sis <- relative_eff(exp(ll_sis), chain_id = rep(1:1, each = 4000))
+
+ll_sis <- extract_log_lik(fit_snc_sis_model, parameter_name= "log_likelihood")
+loo(ll_sis)
+```
+
+## Extrapolating in time
+```{r}
+n_weeks_is <- 8
+n_weeks_oos <- length(weeks) - n_weeks_is
+
+snc_abundance_is <- matrix(nrow = n_mice, ncol=n_weeks_is)
+snc_abundance_oos <- matrix(nrow = n_mice, ncol=n_weeks_oos)
+
+for (m in 1:n_mice) {
+  for (t in 1:n_weeks_is) {
+    mouse <- mice[m]
+    week <- weeks[t]
+    mouse_week_index <- which(snc_counts$mouse == mouse & snc_counts$week == week)[1]
+    snc_abundance_is[m, t] <- snc_counts$norm_abundance[mouse_week_index]
+  }
+}
+for (m in 1:n_mice) {
+  for (t in (n_weeks_is+1):n_weeks) {
+    mouse <- mice[m]
+    week <- weeks[t]
+    mouse_week_index <- which(snc_counts$mouse == mouse & snc_counts$week == week)[1]
+    snc_abundance_oos[m, t - n_weeks_is] <- snc_counts$norm_abundance[mouse_week_index]
+  }
+}
+
+# times
+t_is <- sort(weeks)[1:n_weeks_is] # 8 hard-coded to match data
+t_oos <- sort(weeks)[(n_weeks_is+1): n_weeks]
+
+t0 = 0
+t0_oos = n_weeks_is
+
+
+# initial conditions
+y0 <- c(1)
+dim(y0) <- (1)
+y0_oos <- mean_abundances[n_weeks_is];
+dim(y0_oos) <- 1
+
+# data for Stan
+data_snc_split <- list(
+  n_weeks = n_weeks_is, 
+  n_mice = n_mice, 
+  y0 = y0, 
+  t0 = t0, 
+  ts = t_is, 
+  cells = snc_abundance_is,
+  n_weeks_oos = n_weeks_oos,
+  y0_oos = y0_oos,
+  t0_oos = t0_oos
+)
+```
+
+```{r}
+sr_model <- stan_model("snc_sr_model.stan")
+if (params$refit_models) {
+  fit_snc_sr_split_model <- sampling(
+    sr_model,
+    data = data_snc_split,
+    iter = niter,
+    chains = 4,
+    control = list(adapt_delta = .99)
+  )
+  saveRDS(fit_snc_sr_split_model, "saved_fit/fit_snc_sr_split_model.RDS")
+} else {
+  fit_snc_sr_split_model <- readRDS("saved_fit/fit_snc_sr_split_model.RDS")
+}
+```
+
+```{r}
+sis_model <- stan_model("snc_sis_model.stan")
+if (params$refit_models) {
+  fit_snc_sis_split_model <- sampling(
+    sis_model,
+    data = data_snc_split,
+    iter = niter,
+    chains = 4,
+    control = list(adapt_delta = .99)
+  )
+  saveRDS(fit_snc_sis_split_model, "saved_fit/fit_snc_sis_split_model.RDS")
+} else {
+  fit_snc_sis_split_model <- readRDS("saved_fit/fit_snc_sis_split_model.RDS")
+}
+```
+```{r}
+sr_pars=c('eta', 'beta', 'sigma', 'lp__', 'log_likelihood')
+print(fit_snc_sr_model, pars = sr_pars, digits_summary = 4)
+print(fit_snc_sr_split_model, pars = sr_pars, digits_summary = 4)
+```
+```{r}
+sis_pars=c('eta', 'beta', 'sigma', 'll', 'alpha', 'lp__', 'log_likelihood')
+print(fit_snc_sis_model, pars = sis_pars)
+print(fit_snc_sis_split_model, pars = sis_pars)
+```
+
+```{r}
+snc_sr_oos_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sr_split_model, pars = "pred_cells_means_oos", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ),
+  t = t_oos,
+  mean_abundances = mean_abundances[(n_weeks_is+1): n_weeks],
+  stddev_abundances = mean_abundances[(n_weeks_is+1): n_weeks]
+)
+snc_sis_oos_counts_pred <- cbind(
+  as.data.frame(
+    summary(
+      fit_snc_sis_split_model, pars = "pred_cells_means_oos", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  ),
+  t = t_oos,
+  mean_abundances = mean_abundances[(n_weeks_is+1): n_weeks],
+  stddev_abundances = mean_abundances[(n_weeks_is+1): n_weeks]
+)
+colnames(snc_sr_oos_counts_pred) <- make.names(colnames(snc_sr_oos_counts_pred)) # to remove % in the col names
+colnames(snc_sis_oos_counts_pred) <- make.names(colnames(snc_sis_oos_counts_pred)) # to remove % in the col names
+
+ggplot(snc_sr_oos_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    aes(
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances
+    ),
+    width=.2,
+    position=position_dodge(0.05)
+  ) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(t_oos[1], t_oos[n_weeks_oos])) +
+  labs(title = "Saturated Removal Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+ggplot(snc_sis_oos_counts_pred, mapping = aes(x = t)) +
+  geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+  geom_line(mapping = aes(x = t, y = X50.)) + 
+  geom_point(mapping = aes(y = mean_abundances)) +
+  geom_errorbar(
+    aes(
+      ymin=mean_abundances - stddev_abundances,
+      ymax=mean_abundances + stddev_abundances
+    ),
+    width=.2,
+    position=position_dodge(0.05)
+  ) +
+  scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(t_oos[1], t_oos[n_weeks_oos])) +
+  labs(title = "SIS Model Predictions", x = "Week", y = "SnC (normalized)", color = "name")
+```
+
 
 # Perturbed Data
 ## Loading and visualizing the data
@@ -407,12 +559,12 @@ long_pert_snc_counts_old <- long_pert_snc_counts[long_pert_snc_counts$group == "
 mean_abundances_perturb_young <- aggregate(
   long_pert_snc_counts_young$SnC, 
   list(long_pert_snc_counts_young$week_after_treatment), 
-  mean, na.rm = T
+  median, na.rm = T
 )$x
 mean_abundances_perturb_old <- aggregate(
   long_pert_snc_counts_old$SnC, 
   list(long_pert_snc_counts_old$week_after_treatment), 
-  mean, na.rm = T
+  median, na.rm = T
 )$x
 stddev_abundances_perturb_young <- aggregate(
   long_pert_snc_counts_young$SnC, 
@@ -473,21 +625,44 @@ half_life_sr_mean_old <- 1 / (
 )
 half_life_sr_mean_old
 ```
-
+## Predicted LL SnCs at old & young start times
+```{r}
+snc_sis_ll_counts_pred_young <- 
+  as.data.frame(
+    summary(
+      fit_snc_sis_model, pars = "pred_ll_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  )
+snc_sis_ll_counts_pred_old <- 
+  as.data.frame(
+    summary(
+      fit_snc_sis_model, pars = "pred_ll_cells_means", 
+      probs = c(0.05, 0.5, 0.95)
+    )$summary
+  )
+t
+snc_sis_ll_counts_pred_young
+snc_sis_ll_counts_pred_old
+```
 ## Predicting pulse data results
 ```{r}
 t0_young <- 16
 t0_old <- 94
 
+ll_young <- c(mean = 0.4228642, sd = .2310055)
+ll_old <- c(mean = 1.6076111, sd = 0.9887867)
+
 # initial conditions for both cases
-y0_young <- 50
+y0_young <- mean(init_pert_snc_counts$SnC[init_pert_snc_counts$group == "PBS_YNG"]) + 50
+
 dim(y0_young) <- 1
-y0_old <- 50
+y0_old <- mean(init_pert_snc_counts$SnC[init_pert_snc_counts$group == "PBS_OLD"]) + 50
 dim(y0_old) <- 1
 
-eta_sr_param <- summary(
+beta_sr_param <- summary(
   fit_snc_sr_model, 
-  pars = c("eta[1]", "eta[2]")
+  pars = c("beta[1]", "beta[2]")
 )$summary[, c("mean")]
 
 
@@ -528,7 +703,7 @@ data_snc_sr_young <- list(
   y0 = y0_young, 
   t0 = t0_young, 
   ts = t_young, 
-  eta = eta_sr_param
+  beta = beta_sr_param
 )
 data_snc_sr_old <- list(
   n_weeks = n_weeks_old,
@@ -539,13 +714,13 @@ data_snc_sr_old <- list(
   y0 = y0_old,
   t0 = t0_old,
   ts = t_old,
-  eta = eta_sr_param
+  beta = beta_sr_param
 )
 
 # SIS stan pre-processing
-eta_sis_param <- summary(
+beta_sis_param <- summary(
   fit_snc_sis_model, 
-  pars = c("eta[1]", "eta[2]")
+  pars = c("beta[1]", "beta[2]")
 )$summary[, c("mean")]
 alpha_sis_param <- summary(
   fit_snc_sis_model,
@@ -561,8 +736,8 @@ data_snc_sis_young <- list(
   y0 = y0_young, 
   t0 = t0_young, 
   ts = t_young, 
-  eta = eta_sis_param,
-  alpha = alpha_sis_param
+  beta = beta_sis_param,
+  ll_param = ll_young
 )
 data_snc_sis_old <- list(
   n_weeks = n_weeks_old,
@@ -573,8 +748,8 @@ data_snc_sis_old <- list(
   y0 = y0_old,
   t0 = t0_old,
   ts = t_old,
-  eta = eta_sis_param,
-  alpha = alpha_sis_param
+  beta = beta_sis_param,
+  ll_param = ll_old
 )
 
 # number of MCMC steps
@@ -589,13 +764,15 @@ fit_snc_sr_sim_young <- sampling(
   snc_sr_sim_model,
   data = data_snc_sr_young,
   iter = niter,
-  chains = 4
+  chains = 4,
+  control = list(adapt_delta = .99)
 )
 fit_snc_sr_sim_old <- sampling(
   snc_sr_sim_model,
   data = data_snc_sr_old,
   iter = niter,
-  chains = 4
+  chains = 4,
+  control = list(adapt_delta = .99)
 )
 ```
 
@@ -605,35 +782,40 @@ fit_snc_sis_sim_young <- sampling(
   snc_sis_sim_model,
   data = data_snc_sis_young,
   iter = niter,
-  chains = 4
+  chains = 4,
+  control = list(adapt_delta = .99)
 )
 fit_snc_sis_sim_old <- sampling(
   snc_sis_sim_model,
   data = data_snc_sis_old,
   iter = niter,
-  chains = 4
+  chains = 4,
+  control = list(adapt_delta = .99)
 )
 ```
 
 ```{r}
-sr_pars=c('beta', 'sigma', 'lp__', 'pred_cells_means')
+sr_pars=c('eta', 'sigma', 'beta', 'lp__')
 print(fit_snc_sr_sim_young, pars = sr_pars, digits_summary = 4)
 print(fit_snc_sr_sim_old, pars = sr_pars, digits_summary = 4)
 ```
 
 
 ```{r}
-sis_pars <- c('beta', 'll', 'sigma', 'lp__', 'pred_cells_means')
+sis_pars <- c('eta', 'll', 'beta', 'sigma', 'lp__')
 print(fit_snc_sis_sim_young, pars = sis_pars, digits_summary = 4)
 print(fit_snc_sis_sim_old, pars = sis_pars, digits_summary = 4)
 ```
 
+```{r}
+pairs(fit_snc_sr_sim_old, pars=sr_pars)
+```
 
 ```{r}
 snc_sr_sim_counts_pred_young <- cbind(
   as.data.frame(
     summary(
-      fit_snc_sr_sim_young, pars = "pred_cells_means", 
+      fit_snc_sr_sim_young, pars = "pred_cells", 
       probs = c(0.25, 0.5, 0.75)
     )$summary
   ), 
@@ -644,7 +826,7 @@ snc_sr_sim_counts_pred_young <- cbind(
 snc_sr_sim_counts_pred_old <- cbind(
   as.data.frame(
     summary(
-      fit_snc_sr_sim_old, pars = "pred_cells_means", 
+      fit_snc_sr_sim_old, pars = "pred_cells", 
       probs = c(0.25, 0.5, 0.75)
     )$summary
   ), 
@@ -655,7 +837,7 @@ snc_sr_sim_counts_pred_old <- cbind(
 snc_sis_sim_counts_pred_young <- cbind(
   as.data.frame(
     summary(
-      fit_snc_sis_sim_young, pars = "pred_cells_means", 
+      fit_snc_sis_sim_young, pars = "pred_cells", 
       probs = c(0.25, 0.5, 0.75)
     )$summary
   ), 
@@ -666,7 +848,7 @@ snc_sis_sim_counts_pred_young <- cbind(
 snc_sis_sim_counts_pred_old <- cbind(
   as.data.frame(
     summary(
-      fit_snc_sis_sim_old, pars = "pred_cells_means", 
+      fit_snc_sis_sim_old, pars = "pred_cells", 
       probs = c(0.25, 0.5, 0.75)
     )$summary
   ), 
@@ -716,6 +898,58 @@ fit_snc_sis_sim_old.bridge <- bridge_sampler(fit_snc_sis_sim_old)
 bayes_factor(fit_snc_sis_sim_young.bridge, fit_snc_sr_sim_young.bridge)
 bayes_factor(fit_snc_sis_sim_old.bridge, fit_snc_sr_sim_old.bridge)
 ```
+# Hierarchical Model
+```{r}
+# fit_snc_sr_hier_model <- stan(
+#   file = "snc_sr_model_hierarchical.stan",
+#   data = data_snc,
+#   iter = niter * 2,
+#   chains = 4,
+#   control = list(max_treedepth = 15, adapt_delta = .95)
+# )
+# saveRDS(
+#   fit_snc_sr_hier_model, 
+#   "saved_fit/fit_snc_sr_model_hierarchical.RDS"
+# )
+```
 
+```{r}
+# sr_hierarchical_pars=c('mu', 'tau', 'sigma', 'lp__', 'log_likelihood')
+# print(fit_snc_sr_hier_model, pars = sr_hierarchical_pars, digits_summary = 4)
+```
+
+
+```{r}
+# pairs(fit_snc_sr_hier_model, pars=c("sigma", "tau", "mu"))
+```
+
+```{r}
+# snc_sr_hier_counts_pred <- cbind(
+#   as.data.frame(
+#     summary(
+#       fit_snc_sr_hier_model, pars = "pred_cells", 
+#       probs = c(0.05, 0.5, 0.95)
+#     )$summary
+#   ), 
+#   t,
+#   mouse = sort(rep(1:n_mice, times = n_weeks))
+# )
+# colnames(snc_sr_hier_counts_pred) <- make.names(colnames(snc_sr_hier_counts_pred)) # to remove % in the col names
+# plots <- c()
+# make_pp_plot <- function(i) {
+#   mice_i_pred_counts <- subset(snc_sr_hier_counts_pred, mouse == i)
+#   mice_i_real_counts <- snc_abundance[i,]
+#   p <- ggplot(mice_i_pred_counts, mapping = aes(x = t)) +
+#     geom_ribbon(aes( ymin = X5., ymax = X95.), fill = "orange", alpha = 0.6) +
+#     geom_line(mapping = aes(x = t, y = X50.)) +
+#     geom_point(mapping = aes(y = mice_i_real_counts)) +
+#     scale_x_continuous(name = "Week", breaks=t, labels=t, limits = c(8, 80)) +
+#     labs( x = "Week", y = "SnC (normalized)", color = "name")
+#     # facet_wrap()
+#   return(p)
+# }
+# ggarrange(plotlist = lapply(1:n_mice, make_pp_plot), ncol = 3, nrow = 2,
+#           common.legend = T)
+```
 
 

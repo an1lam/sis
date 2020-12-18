@@ -16,14 +16,14 @@ functions {
 
 data {
   int<lower=1> n_weeks;
-  int n_weeks_oos_young;
+  int n_weeks_oos;
   int<lower=1> n_mice;
   real t0;
-  real t0_oos_young;
+  real t0_oos;
 
   real ts[n_weeks];
   real cells[n_mice, n_weeks];
-  real y0_oos_young[1];
+  real y0_oos[1];
 }
 
 transformed data {
@@ -66,9 +66,11 @@ model {
 generated quantities {
   real pred_cells[n_mice, n_weeks];
   real pred_cells_means[n_weeks];
-  real pred_cells_oos_young[n_weeks_oos_young];
+  real pred_cells_oos[n_mice, n_weeks_oos];
+  real pred_cells_means_oos[n_weeks_oos];
+
   real log_likelihood = 0;
-  real oos_weeks_young[n_weeks_oos_young];
+  real oos_weeks[n_weeks_oos];
   real theta[4];
   
   for (i in 1:n_mice) {
@@ -85,13 +87,19 @@ generated quantities {
   // Posterior predictive samples for young mice out-of-equilibrium example.
   theta[1:2] = eta;
   theta[3:4] = beta;
-  for (i in 1:n_weeks_oos_young) {
-    oos_weeks_young[i] = t0_oos_young + i ;
+  for (i in 1:n_weeks_oos) {
+    oos_weeks[i] = t0_oos + i ;
   }
-  pred_cells_oos_young = lognormal_rng(
-    log(integrate_ode_rk45(
-      snc, y0_oos_young, t0, oos_weeks_young, theta, x_r, x_i
-    )[, 1]),
-    sigma
-  );
+  
+  for (i in 1:n_mice) {
+    pred_cells_oos[i] = lognormal_rng(
+      log(integrate_ode_rk45(
+       snc, y0_oos, t0_oos, oos_weeks, theta, x_r, x_i
+      )[, 1]),
+      sigma
+    );
+  }
+  for (i in 1:n_weeks_oos) {
+    pred_cells_means_oos[i] = mean(pred_cells_oos[:, i]);
+  }
 }

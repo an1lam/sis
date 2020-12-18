@@ -8,13 +8,13 @@ functions {
 }
 
 transformed data {
-  vector[1] y_guess = [log(2)]'; // Initial guess of Gaussian standard deviation
-  vector[1] theta = [2]';       // Target quantile
+  vector[1] y_guess = [log(.5)]'; // Initial guess of Gaussian standard deviation
+  vector[1] theta = [.5]';       // Target quantile
   vector[1] y;
   real x_r[0];
   int x_i[0];
 
-  // Find Gaussian standard deviation that ensures 99% probabilty below 2
+  // Find Gaussian standard deviation that ensures 99% probabilty below .02
   y = algebra_solver(tail_delta, y_guess, theta, x_r, x_i);
 
   print("Standard deviation = ", exp(y[1]));
